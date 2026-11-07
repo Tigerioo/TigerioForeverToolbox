@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: Tigerio's Forever Toolbox
+## Notes: 记录角色升级日期与每日在线时长。
+## Author: Tigerio
+## Version: 0.1.0
+## SavedVariables: TigerioForeverToolboxDB
+
+Calendar.lua
