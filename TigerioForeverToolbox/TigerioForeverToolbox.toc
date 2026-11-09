@@ -1,8 +1,47 @@
 ## Interface: 16001
 ## Title: Tigerio's Forever Toolbox
-## Notes: 记录角色升级日期与每日在线时长。
-## Author: Tigerio
+## Notes: 升级日历、装备及目标提示。
+## Author: 陌上猛虎
 ## Version: 0.1.0
 ## SavedVariables: TigerioForeverToolboxDB
+## OptionalDeps: AdventureJournal, QuestieDB, Questie, BaiYunFeiQuestieCN
 
+NativeUI.lua
 Calendar.lua
+GearHints.lua
+GearPopup.lua
+QuestHints.lua
+QuestNameplates.lua
+ServiceHints.lua
+ServiceNameplates.lua
+FrameMover.lua
+DungeonGuideData.lua
+QuestieDungeonSource.lua
+DungeonGuide.lua
+WeaponMastersData.lua
+WeaponMasters.lua
+LuckCatalog.lua
+LuckCore.lua
+LuckUI.lua
+CompanionCore.lua
+CompanionUI.lua
+HUDCast.lua
+HUDTargetState.lua
+HUDCombo.lua
+HUDRuntime.lua
+HUDConfig.lua
+ActionBarStyle.lua
+ActionBarRows.lua
+MapButtons.lua
+MapStyle.lua
+ChatStyle.lua
+GroupStyle.lua
+PartyFrames.lua
+ProgressStyle.lua
+MicroMenuStyle.lua
+MerchantAutomation.lua
+GlobalUIConfig.lua
+CharacterEntry.lua
+MinimapEntry.lua
+ChangeLogData.lua
+ChangeLogUI.lua
