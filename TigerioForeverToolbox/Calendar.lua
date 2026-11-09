@@ -1,4 +1,4 @@
-local ADDON = ...
+local ADDON, Toolbox = ...
 local events = CreateFrame("Frame")
 local currentCharacter, lastTick
 local window, viewYear, viewMonth, selectedDate
@@ -21,6 +21,46 @@ local function dailyRecord(character, key)
     return record
 end
 
+-- The two addons record the same level-up independently, potentially on either
+-- side of a clock second. Match only the same level within a short time window.
+local function hasLevel(character, level, when)
+    for _, record in pairs(character.days) do
+        if type(record) == "table" and type(record.levels) == "table" then
+            for _, existing in ipairs(record.levels) do
+                if type(existing) == "table" and existing.level == level
+                    and type(existing.when) == "number" and math.abs(existing.when - when) <= 5 then
+                    return existing
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function adventureJournalLoaded()
+    local check = C_AddOns and C_AddOns.IsAddOnLoaded or IsAddOnLoaded
+    return type(check) == "function" and check("AdventureJournal")
+end
+
+local function importAdventureJournal()
+    if not currentCharacter or not adventureJournalLoaded()
+        or type(AdventureJournalDB) ~= "table" or type(AdventureJournalDB.entries) ~= "table" then return end
+    for _, entry in ipairs(AdventureJournalDB.entries) do
+        if type(entry) == "table" and entry.kind == "level"
+            and type(entry.level) == "number" and entry.level > 0 and entry.level < math.huge
+            and entry.level == math.floor(entry.level)
+            and type(entry.when) == "number" and entry.when > 0 and entry.when < math.huge
+            and entry.when == math.floor(entry.when) then
+            local valid, key = pcall(dayKey, entry.when)
+            if valid and type(key) == "string" and key:match("^%d%d%d%d%-%d%d%-%d%d$")
+                and not hasLevel(currentCharacter, entry.level, entry.when) then
+                local record = dailyRecord(currentCharacter, key)
+                record.levels[#record.levels + 1] = {level = entry.level, when = entry.when, source = "AdventureJournal"}
+            end
+        end
+    end
+end
+
 -- Account time against civil-day boundaries, including sessions crossing midnight.
 local function accountTime(now)
     if not currentCharacter or not lastTick then return end
@@ -36,11 +76,6 @@ local function accountTime(now)
     end
 end
 
-local function duration(seconds)
-    local minutes = math.floor((tonumber(seconds) or 0) / 60)
-    return string.format("%d小时%02d分", math.floor(minutes / 60), minutes % 60)
-end
-
 local function text(parent, font, x, y, value)
     local label = parent:CreateFontString(nil, "OVERLAY", font)
     label:SetPoint("TOPLEFT", x, -y)
@@ -49,12 +84,65 @@ local function text(parent, font, x, y, value)
     return label
 end
 
+-- Keep the native fonts, but soften the strong default gold to match the calendar.
+local function tint(label, r, g, b)
+    if type(label.SetTextColor) == "function" then label:SetTextColor(r, g, b) end
+end
+
+local function validPlayedSeconds(seconds)
+    if type(issecretvalue) == "function" then
+        local ok, secret = pcall(issecretvalue, seconds)
+        if not ok or secret then return false end
+    end
+    return type(seconds) == "number" and seconds >= 0 and seconds < math.huge
+end
+
+local function playedDuration(seconds)
+    if not validPlayedSeconds(seconds) then return "未知" end
+    if seconds < 60 then return string.format("%d秒", math.floor(seconds)) end
+    local minutes = math.floor(seconds / 60)
+    local days = math.floor(minutes / 1440)
+    local hours = math.floor(minutes / 60) % 24
+    local rest = minutes % 60
+    if days > 0 then return string.format("%d天%d小时%02d分", days, hours, rest) end
+    return string.format("%d小时%02d分", hours, rest)
+end
+
+local function renderPlayed()
+    if not window or not window.totalPlayed or not window.levelPlayed then return end
+    local total, level
+    if type(Toolbox.playedTimeSnapshot) == "function" then
+        local ok
+        ok, total, level = pcall(Toolbox.playedTimeSnapshot)
+        if not ok then total, level = nil, nil end
+    end
+    window.totalPlayed:SetText("总时长 " .. (validPlayedSeconds(total) and "约" or "") .. playedDuration(total))
+    window.levelPlayed:SetText("本级 " .. (validPlayedSeconds(level) and "约" or "") .. playedDuration(level))
+end
+
+Toolbox.onPlayedTimeChanged = renderPlayed
+
 local function button(parent, width, height, value, onClick)
-    local control = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+    local control = CreateFrame("Button", nil, parent)
     control:SetSize(width, height)
-    control:SetText(value)
+    local background = control:CreateTexture(nil, "BACKGROUND")
+    background:SetAllPoints()
+    background:SetColorTexture(0.14, 0.105, 0.075, 0.9)
+    local hover = control:CreateTexture(nil, "HIGHLIGHT")
+    hover:SetAllPoints()
+    hover:SetColorTexture(0.9, 0.67, 0.25, 0.18)
+    local label = control:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    label:SetPoint("CENTER")
+    label:SetText(value)
+    tint(label, 0.87, 0.78, 0.54)
     control:SetScript("OnClick", onClick)
     return control
+end
+
+local function markSelected(cell, selected)
+    for _, edge in ipairs(cell.selection) do
+        if selected then edge:Show() else edge:Hide() end
+    end
 end
 
 local function namesForDay(key)
@@ -71,36 +159,54 @@ local function namesForDay(key)
     return rows
 end
 
-local function renderDetails()
+local function renderDetails(resetScroll)
     local rows = namesForDay(selectedDate)
-    window.detailTitle:SetText(selectedDate .. " 角色记录")
-    local lines = {}
-    local total = 0
+    window.detailTitle:SetText(selectedDate)
+    local records, names, characterCount = {}, {}, 0
     for _, item in ipairs(rows) do
-        local character, record = item.character, item.record
-        local seconds = tonumber(record.seconds) or 0
-        total = total + seconds
-        lines[#lines + 1] = "|cffffd27f" .. (character.name or "未知角色") .. " - " .. (character.realm or "未知服务器") .. "|r"
-        lines[#lines + 1] = "在线 " .. duration(seconds)
-        if type(record.levels) == "table" then
-            for _, level in ipairs(record.levels) do
+        local added = false
+        if type(item.record.levels) == "table" then
+            for _, level in ipairs(item.record.levels) do
                 if type(level) == "table" and type(level.when) == "number" then
-                    lines[#lines + 1] = date("%H:%M", level.when) .. "  升到 " .. tostring(level.level) .. " 级"
+                    records[#records + 1] = {when = level.when, level = level.level, levelElapsed = level.levelElapsed, character = item.character}
+                    added = true
                 end
             end
         end
-        lines[#lines + 1] = ""
+        if added then
+            characterCount = characterCount + 1
+            local name = item.character.name or "未知角色"
+            names[name] = (names[name] or 0) + 1
+        end
     end
-    if #rows == 0 then lines[1] = "这一天还没有记录。" end
-    window.detailSummary:SetText("当天合计在线 " .. duration(total))
+    table.sort(records, function(a, b)
+        if a.when ~= b.when then return a.when < b.when end
+        local aName, bName = a.character.name or "", b.character.name or ""
+        if aName ~= bName then return aName < bName end
+        return (tonumber(a.level) or 0) < (tonumber(b.level) or 0)
+    end)
+    local lines = {}
+    for _, entry in ipairs(records) do
+        local character = ""
+        if characterCount > 1 then
+            local name = entry.character.name or "未知角色"
+            if names[name] > 1 and entry.character.realm then name = name .. "-" .. entry.character.realm end
+            character = "  " .. name
+        end
+        local duration = validPlayedSeconds(entry.levelElapsed) and ("  ·  约" .. playedDuration(entry.levelElapsed)) or ""
+        lines[#lines + 1] = "|cffaaaaaa" .. date("%H:%M", entry.when) .. "|r" .. character .. "  升到 " .. tostring(entry.level) .. " 级" .. duration
+    end
+    if #lines == 0 then lines[1] = "暂无记录" end
     window.detailText:SetText(table.concat(lines, "\n"))
     window.detailContent:SetHeight(math.max(1, window.detailText:GetStringHeight() + 20))
-    window.detailScroll:SetVerticalScroll(0)
+    if resetScroll then window.detailScroll:SetVerticalScroll(0) end
 end
 
-local function renderCalendar()
+local function renderCalendar(resetScroll)
     if not window then return end
+    renderPlayed()
     window.monthTitle:SetText(string.format("%d 年 %d 月", viewYear, viewMonth))
+    local today = dayKey(time())
     local first = time({year = viewYear, month = viewMonth, day = 1, hour = 12, min = 0, sec = 0})
     local firstWeekday = date("*t", first).wday
     local last = time({year = viewYear, month = viewMonth + 1, day = 0, hour = 12, min = 0, sec = 0})
@@ -115,73 +221,111 @@ local function renderCalendar()
                 if type(item.record.levels) == "table" then levels = levels + #item.record.levels end
             end
             cell.dateKey = key
-            cell:SetText(tostring(day) .. (levels > 0 and "  |cffffd100↑" .. levels .. "|r" or (#rows > 0 and "  |cff80c080·|r" or "")))
+            cell.dayLabel:SetText(tostring(day))
+            cell.todayLabel:SetText(key == today and "今" or "")
+            cell.recordLabel:SetText(levels > 0 and ("↑" .. (levels > 99 and "99+" or tostring(levels))) or "")
+            markSelected(cell, key == selectedDate)
             cell:Show()
         else
             cell.dateKey = nil
             cell:Hide()
         end
     end
-    renderDetails()
+    renderDetails(resetScroll)
 end
 
 local function changeMonth(offset)
     local parts = date("*t", time({year = viewYear, month = viewMonth + offset, day = 1, hour = 12, min = 0, sec = 0}))
     viewYear, viewMonth = parts.year, parts.month
     selectedDate = string.format("%04d-%02d-01", viewYear, viewMonth)
-    renderCalendar()
+    renderCalendar(true)
+end
+
+local function goToday()
+    local now = time()
+    local parts = date("*t", now)
+    viewYear, viewMonth, selectedDate = parts.year, parts.month, dayKey(now)
+    renderCalendar(true)
 end
 
 local function createWindow()
-    local f = CreateFrame("Frame", "TigerioForeverToolboxFrame", UIParent, "BackdropTemplate")
-    f:SetSize(770, 510)
-    f:SetPoint("CENTER")
-    f:SetFrameStrata("DIALOG")
-    f:SetClampedToScreen(true)
-    f:SetMovable(true)
-    f:EnableMouse(true)
-    f:RegisterForDrag("LeftButton")
-    f:SetScript("OnDragStart", f.StartMoving)
-    f:SetScript("OnDragStop", f.StopMovingOrSizing)
-    f:SetBackdrop({bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1})
-    f:SetBackdropColor(0.045, 0.043, 0.04, 0.98)
-    f:SetBackdropBorderColor(0.48, 0.39, 0.26)
-    text(f, "GameFontNormalLarge", 20, 18, "Tigerio 的无限升级工具箱")
-    text(f, "GameFontHighlightSmall", 20, 45, "升级日历 · 本机日期 · 包含挂机时间")
-    local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-    close:SetPoint("TOPRIGHT")
-    close:SetScript("OnClick", function() f:Hide() end)
+    local f = Toolbox.createNativeWindow("TigerioForeverToolboxFrame", "Tigerio 的无限升级工具箱", 770, 510, "calendar")
+    Toolbox.nativeSection(f, 16, 68, 398, 349)
+    Toolbox.nativeSection(f, 428, 68, 326, 393)
+    Toolbox.nativeDivider(f, 20, 62, 730)
+    Toolbox.nativeDivider(f, 435, 106, 290)
+    tint(text(f, "GameFontNormalLarge", 70, 40, "升级日历"), 0.93, 0.81, 0.48)
+    f.totalPlayed = text(f, "GameFontHighlightSmall", 174, 43, "总时长 未知")
+    f.totalPlayed:SetWidth(220)
+    f.levelPlayed = text(f, "GameFontHighlightSmall", 410, 43, "本级 未知")
+    f.levelPlayed:SetWidth(220)
 
-    local previous = button(f, 65, 24, "上月", function() changeMonth(-1) end)
+    local previous = button(f, 54, 24, "< 上月", function() changeMonth(-1) end)
     previous:SetPoint("TOPLEFT", 20, -76)
-    local nextButton = button(f, 65, 24, "下月", function() changeMonth(1) end)
-    nextButton:SetPoint("TOPLEFT", 342, -76)
-    f.monthTitle = text(f, "GameFontNormal", 156, 81, "")
+    f.monthTitle = text(f, "GameFontNormal", 108, 81, "")
+    tint(f.monthTitle, 0.89, 0.75, 0.41)
+    local nextButton = button(f, 54, 24, "下月 >", function() changeMonth(1) end)
+    nextButton:SetPoint("TOPLEFT", 257, -76)
+    local today = button(f, 54, 24, "今天", goToday)
+    today:SetPoint("TOPLEFT", 348, -76)
     local weekdays = {"日", "一", "二", "三", "四", "五", "六"}
-    for i, day in ipairs(weekdays) do text(f, "GameFontNormalSmall", 39 + (i - 1) * 56, 115, day) end
+    for i, day in ipairs(weekdays) do
+        tint(text(f, "GameFontNormalSmall", 39 + (i - 1) * 56, 115, day), 0.85, 0.72, 0.37)
+    end
     f.cells = {}
     for i = 1, 42 do
-        local cell = button(f, 52, 40, "", function(self)
+        local cell = CreateFrame("Button", nil, f)
+        cell:SetSize(52, 40)
+        cell:EnableMouse(true)
+        cell:SetScript("OnClick", function(self)
             selectedDate = self.dateKey
-            renderDetails()
+            renderCalendar(true)
         end)
         cell:SetPoint("TOPLEFT", 20 + ((i - 1) % 7) * 56, -136 - math.floor((i - 1) / 7) * 45)
+        local background = cell:CreateTexture(nil, "BACKGROUND")
+        background:SetAllPoints()
+        background:SetColorTexture(0.14, 0.105, 0.075, 0.9)
+        local hover = cell:CreateTexture(nil, "HIGHLIGHT")
+        hover:SetAllPoints()
+        hover:SetColorTexture(0.9, 0.67, 0.25, 0.18)
+        cell.dayLabel = text(cell, "GameFontHighlight", 7, 4, "")
+        tint(cell.dayLabel, 0.93, 0.89, 0.79)
+        cell.todayLabel = cell:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        cell.todayLabel:SetPoint("TOPRIGHT", -6, -4)
+        tint(cell.todayLabel, 0.91, 0.79, 0.48)
+        cell.recordLabel = cell:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        cell.recordLabel:SetPoint("BOTTOMRIGHT", -5, 4)
+        tint(cell.recordLabel, 0.91, 0.79, 0.48)
+        cell.selection = {}
+        for edge = 1, 4 do
+            local line = cell:CreateTexture(nil, "OVERLAY")
+            line:SetColorTexture(0.95, 0.73, 0.29, 1)
+            if edge == 1 then
+                line:SetPoint("TOPLEFT"); line:SetPoint("TOPRIGHT"); line:SetHeight(2)
+            elseif edge == 2 then
+                line:SetPoint("BOTTOMLEFT"); line:SetPoint("BOTTOMRIGHT"); line:SetHeight(2)
+            elseif edge == 3 then
+                line:SetPoint("TOPLEFT"); line:SetPoint("BOTTOMLEFT"); line:SetWidth(2)
+            else
+                line:SetPoint("TOPRIGHT"); line:SetPoint("BOTTOMRIGHT"); line:SetWidth(2)
+            end
+            line:Hide()
+            cell.selection[#cell.selection + 1] = line
+        end
         f.cells[i] = cell
     end
-    text(f, "GameFontHighlightSmall", 20, 424, "↑ 升级次数    · 有在线记录")
-    text(f, "GameFontHighlightSmall", 20, 449, "仅记录启用后的数据；角色需分别登录。")
-
     f.detailTitle = text(f, "GameFontNormal", 435, 80, "")
-    f.detailSummary = text(f, "GameFontHighlightSmall", 435, 105, "")
+    tint(f.detailTitle, 0.90, 0.77, 0.47)
     local scroll = CreateFrame("ScrollFrame", "TigerioForeverToolboxDetailsScroll", f, "UIPanelScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT", 435, -132)
-    scroll:SetSize(290, 312)
+    scroll:SetPoint("TOPLEFT", 435, -116)
+    scroll:SetSize(290, 328)
     local content = CreateFrame("Frame", nil, scroll)
     content:SetSize(275, 1)
     scroll:SetScrollChild(content)
     f.detailText = text(content, "GameFontHighlightSmall", 0, 0, "")
     f.detailText:SetWidth(270)
     f.detailText:SetJustifyV("TOP")
+    if type(f.detailText.SetSpacing) == "function" then f.detailText:SetSpacing(4) end
     f.detailContent, f.detailScroll = content, scroll
     UISpecialFrames[#UISpecialFrames + 1] = "TigerioForeverToolboxFrame"
     f:Hide()
@@ -193,12 +337,15 @@ local function openCalendar()
     accountTime(time())
     if not window then window = createWindow() end
     if window:IsShown() then window:Hide(); return end
+    if type(Toolbox.requestPlayedTime) == "function" then pcall(Toolbox.requestPlayedTime, "open") end
     local today = date("*t")
     viewYear, viewMonth = today.year, today.month
     selectedDate = dayKey(time())
-    renderCalendar()
+    renderCalendar(true)
     window:Show()
 end
+
+Toolbox.toggleCalendar = openCalendar
 
 events:RegisterEvent("ADDON_LOADED")
 events:RegisterEvent("PLAYER_LOGIN")
@@ -208,6 +355,9 @@ events:SetScript("OnEvent", function(_, event, argument)
     if event == "ADDON_LOADED" and argument == ADDON then
         if type(TigerioForeverToolboxDB) ~= "table" then TigerioForeverToolboxDB = {} end
         if type(TigerioForeverToolboxDB.characters) ~= "table" then TigerioForeverToolboxDB.characters = {} end
+    elseif event == "ADDON_LOADED" and argument == "AdventureJournal" and currentCharacter then
+        importAdventureJournal()
+        if window and window:IsShown() then renderCalendar() end
     elseif event == "PLAYER_LOGIN" then
         if type(TigerioForeverToolboxDB) ~= "table" then return end
         local name = UnitName("player") or "未知角色"
@@ -219,11 +369,22 @@ events:SetScript("OnEvent", function(_, event, argument)
         currentCharacter.name, currentCharacter.realm = name, realm
         if type(currentCharacter.days) ~= "table" then currentCharacter.days = {} end
         lastTick = time()
+        importAdventureJournal()
     elseif event == "PLAYER_LEVEL_UP" and currentCharacter then
         local now = time()
         accountTime(now)
-        local record = dailyRecord(currentCharacter, dayKey(now))
-        record.levels[#record.levels + 1] = {level = argument, when = now}
+        local elapsed
+        if type(Toolbox.consumePlayedLevelElapsed) == "function" then
+            local ok, value = pcall(Toolbox.consumePlayedLevelElapsed, argument)
+            if ok and validPlayedSeconds(value) then elapsed = value end
+        end
+        local existing = hasLevel(currentCharacter, argument, now)
+        if existing then
+            if elapsed and existing.levelElapsed == nil then existing.levelElapsed = elapsed end
+        else
+            local record = dailyRecord(currentCharacter, dayKey(now))
+            record.levels[#record.levels + 1] = {level = argument, when = now, levelElapsed = elapsed}
+        end
         if window and window:IsShown() then renderCalendar() end
     elseif event == "PLAYER_LOGOUT" then
         accountTime(time())
@@ -242,4 +403,21 @@ events:SetScript("OnUpdate", function(_, delta)
 end)
 
 SLASH_TIGERIOFOREVERTOOLBOX1 = "/tft"
-SlashCmdList.TIGERIOFOREVERTOOLBOX = openCalendar
+SlashCmdList.TIGERIOFOREVERTOOLBOX = function(message)
+    local command = (message or ""):lower():match("^%s*(.-)%s*$")
+    if command == "move" then
+        Toolbox.toggleFrameMove()
+    elseif command == "resetmove" then
+        Toolbox.resetFrameMoves()
+    elseif command == "dungeon" then
+        Toolbox.toggleDungeonGuide()
+    elseif command == "weapon" or command == "weapons" then
+        Toolbox.toggleWeaponMasters()
+    elseif command == "luck" then
+        Toolbox.toggleLuckCollection()
+    elseif command == "" then
+        openCalendar()
+    else
+        print("|cffffd100升级工具箱|r /tft 打开日历；/tft dungeon 副本任务；/tft weapon 武器大师；/tft luck 奇珍图鉴；/tft move 移动框体；/tft resetmove 重置位置。")
+    end
+end
