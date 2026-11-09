@@ -129,14 +129,19 @@ local function update(button)
         button.nameLabel:SetText(name)
     else button.nameLabel:SetText("未知") end
     local health, maximum = call(UnitHealth, unit), call(UnitHealthMax, unit)
-    local r, g, b = classColor(unit)
+    local dead, connected = call(UnitIsDeadOrGhost, unit), call(UnitIsConnected, unit)
+    local offline = readable(connected) and connected == false
+    local r, g, b
+    if offline then r, g, b = 0.45, 0.45, 0.45 else r, g, b = classColor(unit) end
     button.health:SetStatusBarColor(r, g, b, 1)
-    if not pcall(function() button.health:SetMinMaxValues(0, maximum); button.health:SetValue(health) end) then
+    if offline then
+        -- Offline units can report zero health; fill the bar so grey remains visible.
+        button.health:SetMinMaxValues(0, 1); button.health:SetValue(1)
+    elseif not pcall(function() button.health:SetMinMaxValues(0, maximum); button.health:SetValue(health) end) then
         button.health:SetMinMaxValues(0, 1); button.health:SetValue(0)
     end
-    local dead, connected = call(UnitIsDeadOrGhost, unit), call(UnitIsConnected, unit)
-    if readable(dead) and dead == true then button.healthText:SetText("死亡")
-    elseif readable(connected) and connected == false then button.healthText:SetText("离线")
+    if offline then button.healthText:SetText("离线")
+    elseif readable(dead) and dead == true then button.healthText:SetText("死亡")
     else percent(button.healthText, unit, health, maximum) end
     local powerType, token, ar, ag = call(UnitPowerType, unit)
     local power, powerMax = call(UnitPower, unit, powerType), call(UnitPowerMax, unit, powerType)

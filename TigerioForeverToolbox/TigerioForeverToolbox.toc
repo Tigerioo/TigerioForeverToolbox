@@ -2,7 +2,7 @@
 ## Title: Tigerio's Forever Toolbox
 ## Notes: 升级日历、装备及目标提示。
 ## Author: 陌上猛虎
-## Version: 0.1.0
+## Version: 0.1.1
 ## SavedVariables: TigerioForeverToolboxDB
 ## OptionalDeps: AdventureJournal, QuestieDB, Questie, BaiYunFeiQuestieCN
 

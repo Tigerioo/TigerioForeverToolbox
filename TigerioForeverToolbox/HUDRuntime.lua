@@ -392,6 +392,120 @@ local function resource(parent, x)
     return holder
 end
 
+-- Totem positions follow the character-facing Classic layout: fire/earth in
+-- front and air/water behind. Unreadable client values are never guessed.
+local TOTEM_POSITIONS = {
+    {slot = 1, x = -58, y = 58, color = {1, 0.45, 0.20}}, -- fire: front left
+    {slot = 2, x = 58, y = 58, color = {0.75, 0.66, 0.48}}, -- earth: front right
+    {slot = 4, x = -58, y = -58, color = {0.65, 0.75, 0.80}}, -- air: back left
+    {slot = 3, x = 58, y = -58, color = {0.32, 0.65, 1}}, -- water: back right
+}
+
+local function createTotemMonitor(ball)
+    local slots = {}
+    for index, position in ipairs(TOTEM_POSITIONS) do
+        local tile = CreateFrame("Frame", nil, ball)
+        tile:SetSize(56, 56)
+        tile:SetPoint("CENTER", ball, "CENTER", position.x, position.y)
+        tile:EnableMouse(false)
+        if type(tile.SetFrameLevel) == "function" and type(ball.fill.GetFrameLevel) == "function" then
+            tile:SetFrameLevel(ball.fill:GetFrameLevel() + 3)
+        end
+        local glyph = tile:CreateTexture(nil, "BACKGROUND")
+        glyph:SetAllPoints()
+        glyph:SetTexture(MEDIA .. "TotemGlyphs.tga")
+        -- Half-pixel inset prevents adjacent elements bleeding into the slot.
+        glyph:SetTexCoord((index - 1) / 4 + 0.5 / 256, index / 4 - 0.5 / 256, 0, 1)
+        local icon = tile:CreateTexture(nil, "ARTWORK")
+        icon:SetPoint("TOPLEFT", 3, -3); icon:SetPoint("BOTTOMRIGHT", -3, 3)
+        icon:SetTexCoord(0.06, 0.94, 0.06, 0.94)
+        -- Never expose square icon corners if the client's mask API is absent.
+        local masked = false
+        if type(tile.CreateMaskTexture) == "function" and type(icon.AddMaskTexture) == "function" then
+            masked = pcall(function()
+                local mask = tile:CreateMaskTexture()
+                mask:SetAllPoints(icon)
+                mask:SetTexture("Interface\\CharacterFrame\\TempPortraitAlphaMask", "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+                icon:AddMaskTexture(mask)
+                tile.mask = mask
+            end)
+        end
+        icon:Hide()
+        local rim = tile:CreateTexture(nil, "OVERLAY")
+        rim:SetAllPoints(); rim:SetTexture(MEDIA .. "OrbRing.tga")
+        local timer = font(tile, "GameFontHighlightSmall")
+        timer:SetSize(40, 10)
+        timer:SetPoint(position.y > 0 and "BOTTOM" or "TOP", tile,
+            position.y > 0 and "TOP" or "BOTTOM", 0, position.y > 0 and -1 or 1)
+        timer:SetTextColor(1, 0.85, 0.62, 1)
+        timer:SetShadowColor(0, 0, 0, 1)
+        timer:SetShadowOffset(1, -1)
+        timer:SetText("")
+        tile:Hide()
+        slots[#slots + 1] = {index = position.slot, frame = tile, glyph = glyph, icon = icon,
+            rim = rim, timer = timer, masked = masked, color = position.color}
+    end
+    return slots
+end
+
+local function updateTotemTimers(frame)
+    if not frame or not frame.totems then return end
+    local now = call(GetTime)
+    for _, slot in ipairs(frame.totems) do
+        if slot.finish and finite(now) then
+            local remaining = math.max(0, slot.finish - now)
+            local value
+            if remaining >= 3600 then value = math.ceil(remaining / 3600) .. "h"
+            elseif remaining >= 60 then value = math.ceil(remaining / 60) .. "m"
+            else value = math.ceil(remaining) .. "s" end
+            slot.timer:SetText(value)
+        else
+            slot.timer:SetText("")
+        end
+    end
+end
+
+local function updateTotems(frame)
+    if not frame or not frame.totems then return end
+    local _, class = call(UnitClass, "player")
+    local isShaman = readable(class) and class == "SHAMAN"
+    local available = isShaman and type(GetTotemInfo) == "function"
+    for _, slot in ipairs(frame.totems) do
+        local ok, exists, _, start, duration, icon
+        if available then ok, exists, _, start, duration, icon = pcall(GetTotemInfo, slot.index) end
+        if ok and readable(exists) and exists == true and readable(icon)
+            and (type(icon) == "number" or type(icon) == "string") then
+            if slot.masked then
+                slot.icon:SetTexture(icon)
+                slot.icon:Show()
+                slot.glyph:SetVertexColor(1, 1, 1, 1)
+            else
+                slot.icon:Hide()
+                slot.glyph:SetVertexColor(slot.color[1], slot.color[2], slot.color[3], 1)
+            end
+            slot.rim:SetVertexColor(1, 1, 1, 1)
+            if finite(start) and finite(duration) and duration > 0 then
+                local finish = start + duration
+                slot.finish = finite(finish) and finish or nil
+            else
+                slot.finish = nil
+            end
+            slot.frame:Show()
+        else
+            slot.finish = nil
+            slot.icon:Hide()
+            if isShaman then
+                slot.glyph:SetVertexColor(1, 1, 1, 1)
+                slot.rim:SetVertexColor(0.8, 0.8, 0.8, 1)
+                slot.frame:Show()
+            else
+                slot.frame:Hide()
+            end
+        end
+    end
+    updateTotemTimers(frame)
+end
+
 local function percent(current, maximum)
     if not finite(current) or not finite(maximum) or maximum <= 0 then return "—" end
     return string.format("%d%%", math.max(0, math.min(100, math.floor(current / maximum * 100 + 0.5))))
@@ -921,13 +1035,26 @@ local function createHUD()
     frame:SetMovable(true)
     frame:SetClampedToScreen(true)
     frame:EnableMouse(false)
-    frame.player = healthBar(frame, "player", 15)
-    frame.target = healthBar(frame, "target", 419)
+    local _, playerClass = call(UnitClass, "player")
+    local isShaman = readable(playerClass) and playerClass == "SHAMAN"
+    if isShaman and type(frame.SetClampRectInsets) == "function" then
+        -- Include the outward bars and upper/lower totem layout when dragging.
+        pcall(frame.SetClampRectInsets, frame, -15, 15, 7, -32)
+    end
+    -- Keep the totem satellites clear of both bars and their aligned skills.
+    frame.player = healthBar(frame, "player", isShaman and -15 or 15)
+    frame.target = healthBar(frame, "target", isShaman and 449 or 419)
     frame.primary = resource(frame, 305)
+    frame.totems = createTotemMonitor(frame.primary)
     frame.slots = {}
     for i = 1, SLOT_COUNT do
         local tile = CreateFrame("Button", nil, frame, "SecureActionButtonTemplate")
         local x, y, size = buttonPosition(i)
+        if isShaman then
+            if i <= 4 or i == 15 then x = x - 30
+            elseif i <= 8 or i == 16 then x = x + 30
+            else y = y + 36 end
+        end
         tile:SetSize(size or 52, size or 52)
         tile:SetPoint("TOPLEFT", frame, "TOPLEFT", x, -y)
         -- The secure handler selects the active edge from ActionButtonUseKeyDown.
@@ -989,6 +1116,17 @@ local function createHUD()
         local ok, ready = pcall(toolbox.attachHUDCast, frame)
         castOK = ok and ready == true
     end
+    if isShaman and castOK then
+        -- Keep both casting bars directly below their respective health bars.
+        if frame.tftCast then
+            frame.tftCast:ClearAllPoints()
+            frame.tftCast:SetPoint("TOPLEFT", frame, "TOPLEFT", -15, -116)
+        end
+        if frame.tftTargetCast then
+            frame.tftTargetCast:ClearAllPoints()
+            frame.tftTargetCast:SetPoint("TOPLEFT", frame, "TOPLEFT", 449, -116)
+        end
+    end
     if type(toolbox.attachHUDTargetState) == "function" then
         local ok, ready = pcall(toolbox.attachHUDTargetState, frame)
         targetOK = ok and ready == true
@@ -996,6 +1134,7 @@ local function createHUD()
     if type(toolbox.attachHUDCombo) == "function" then
         pcall(toolbox.attachHUDCombo, frame)
     end
+    updateTotems(frame)
     frame.tftReplacementReady = castOK and targetOK and not frame.tftTargetCastUnavailable
     return frame
 end
@@ -1048,7 +1187,7 @@ function toolbox.setHUDEnabled(value)
     config.enabled = value
     if value then updateNativeFrames(hud:IsShown()) else updateNativeFrames(false) end
     if type(toolbox.syncPartyFrames) == "function" then pcall(toolbox.syncPartyFrames) end
-    refreshVitals(); refreshCooldowns(); refreshUsabilityAll(); notify()
+    updateTotems(hud); refreshVitals(); refreshCooldowns(); refreshUsabilityAll(); notify()
     return true
 end
 
@@ -1071,6 +1210,7 @@ for _, event in ipairs({"PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "PLAYER_REGEN_E
     "UNIT_HEALTH", "UNIT_MAXHEALTH", "UNIT_POWER_UPDATE", "UNIT_MAXPOWER", "UNIT_DISPLAYPOWER", "UNIT_NAME_UPDATE", "UNIT_FACTION", "UNIT_FLAGS", "UNIT_LEVEL", "PLAYER_LEVEL_UP", "PLAYER_MAX_LEVEL_UPDATE", "UPDATE_EXPANSION_LEVEL",
     "SPELL_UPDATE_COOLDOWN", "SPELLS_CHANGED", "UPDATE_SHAPESHIFT_FORMS", "UPDATE_SHAPESHIFT_FORM", "CVAR_UPDATE",
     "UPDATE_BINDINGS", "ACTIONBAR_SLOT_CHANGED", "ACTIONBAR_PAGE_CHANGED", "UPDATE_BONUS_ACTIONBAR"}) do driver:RegisterEvent(event) end
+pcall(driver.RegisterEvent, driver, "PLAYER_TOTEM_UPDATE")
 
 driver:SetScript("OnEvent", function(_, event, unit)
     if event == "PLAYER_LOGIN" then
@@ -1086,7 +1226,7 @@ driver:SetScript("OnEvent", function(_, event, unit)
         if nativeSyncPending or (character and character.enabled and hud and hud:IsShown()) then
             updateNativeFrames(character and character.enabled and hud and hud:IsShown())
         end
-        refreshVitals(); refreshCooldowns(); refreshUsabilityAll(); notify()
+        updateTotems(hud); refreshVitals(); refreshCooldowns(); refreshUsabilityAll(); notify()
     elseif event == "PLAYER_REGEN_DISABLED" then
         if dragging then
             if not combat() then pcall(finishDrag, hud) else pendingDragStop = true end
@@ -1097,13 +1237,16 @@ driver:SetScript("OnEvent", function(_, event, unit)
         clearHUDKeys(); hudKeyMapDirty = true
     elseif event == "SPELL_UPDATE_COOLDOWN" or event == "SPELLS_CHANGED" or event == "UPDATE_SHAPESHIFT_FORMS" or event == "UPDATE_SHAPESHIFT_FORM" then
         if event ~= "SPELL_UPDATE_COOLDOWN" then clearHUDKeys(); hudKeyMapDirty = true end
+        if event == "UPDATE_SHAPESHIFT_FORM" then updateTotems(hud) end
         refreshCooldowns(); refreshUsabilityAll()
+    elseif event == "PLAYER_TOTEM_UPDATE" then
+        updateTotems(hud)
     elseif event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_TARGET_CHANGED" or event == "ADDON_LOADED" then
         if event ~= "PLAYER_TARGET_CHANGED" then clearHUDKeys(); hudKeyMapDirty = true; installHUDKeyHooks() end
         local previousNotice = nativeFrameNotice
         if character and character.enabled and hud and hud:IsShown() then updateNativeFrames(true) end
         if previousNotice ~= nativeFrameNotice then notify() end
-        refreshVitals(); refreshUsabilityAll()
+        updateTotems(hud); refreshVitals(); refreshUsabilityAll()
     elseif event:match("^UNIT_") then
         if readable(unit) and (unit == "player" or unit == "target") then refreshVitals() end
     else
@@ -1132,5 +1275,6 @@ driver:SetScript("OnUpdate", function(_, elapsed)
     if usabilityElapsed < 0.25 then return end
     usabilityElapsed = 0
     if hudKeyMapDirty then refreshHUDKeys() end
+    updateTotemTimers(hud)
     refreshUsabilityAll()
 end)
