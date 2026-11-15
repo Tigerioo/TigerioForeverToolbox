@@ -5,6 +5,7 @@ local MAX_WATCH = 6
 local monitor
 local learnedCache = {}
 local observedAuraIDs = {}
+local durationFormatter
 
 local function readable(value)
     if type(issecretvalue) ~= "function" then return true end
@@ -25,6 +26,28 @@ end
 local function finite(value)
     return readable(value) and type(value) == "number" and value == value
         and value > -math.huge and value < math.huge
+end
+
+local function getDurationFormatter()
+    if durationFormatter ~= nil then return durationFormatter or nil end
+    durationFormatter = false
+    if not C_StringUtil or type(C_StringUtil.CreateNumericRuleFormatter) ~= "function" then return nil end
+    local rounding = Enum and Enum.NumericRuleFormatRounding or {}
+    local ok, formatter = pcall(C_StringUtil.CreateNumericRuleFormatter)
+    if not ok or not formatter then return nil end
+    ok = pcall(formatter.SetBreakpoints, formatter, {
+        {threshold = 0, format = ""},
+        {threshold = 0.000001, step = 1, rounding = rounding.Up or 1, format = "%d"},
+        {threshold = 60, step = 1, rounding = rounding.Up or 1, format = "%d:%02d",
+            components = {{div = 60, step = 1, rounding = rounding.Down or 2},
+                {mod = 60, step = 1, rounding = rounding.Down or 2}}},
+        {threshold = 180.000001, format = ""},
+    })
+    if not ok then return nil end
+    local checked, visible = pcall(formatter.FormatNumber, formatter, 180)
+    local hiddenOK, hidden = pcall(formatter.FormatNumber, formatter, 181)
+    if checked and visible == "3:00" and hiddenOK and hidden == "" then durationFormatter = formatter end
+    return durationFormatter or nil
 end
 
 local function characterKey()
@@ -246,10 +269,19 @@ local function nativeSlot(tile, id, name, aura)
                 cooldown:SetAllPoints(image); cooldown:EnableMouse(false)
                 if type(cooldown.SetDrawSwipe) == "function" then cooldown:SetDrawSwipe(false) end
                 if type(cooldown.SetDrawEdge) == "function" then cooldown:SetDrawEdge(false) end
-                if type(cooldown.SetHideCountdownNumbers) == "function" then cooldown:SetHideCountdownNumbers(false) end
+                if type(cooldown.SetHideCountdownNumbers) == "function" then cooldown:SetHideCountdownNumbers(true) end
                 frame:SetDurationCooldown(cooldown)
+                local formatter = getDurationFormatter()
+                if formatter and type(frame.SetDurationText) == "function" then
+                    local duration = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                    duration:SetPoint("BOTTOM", frame, "TOP", 0, 2)
+                    duration:SetShadowColor(0, 0, 0, 1); duration:SetShadowOffset(1, -1)
+                    if not pcall(frame.SetDurationText, frame, duration, {textFormatter = formatter}) then
+                        duration:Hide()
+                    end
+                end
                 local count = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-                count:SetPoint("BOTTOMRIGHT", -3, 3)
+                count:SetPoint("CENTER")
                 count:SetTextColor(1, 1, 1)
                 count:SetShadowColor(0, 0, 0, 1); count:SetShadowOffset(1, -1)
                 frame:SetApplicationCount(count, nil)
@@ -269,6 +301,9 @@ local function nativeSlot(tile, id, name, aura)
 end
 
 local function clearTime(tile)
+    tile:SetScript("OnUpdate", nil)
+    tile.expirationTime = nil
+    tile.time:SetText("")
     local cooldown = tile.cooldown
     if not cooldown then return end
     if type(cooldown.Clear) == "function" then pcall(cooldown.Clear, cooldown)
@@ -277,25 +312,29 @@ local function clearTime(tile)
 end
 
 local function showTime(tile, aura)
-    local cooldown = tile.cooldown
-    if not cooldown then return end
     clearTime(tile)
-    local id = auraField(aura, "auraInstanceID")
-    if finite(id) and C_UnitAuras and type(C_UnitAuras.GetAuraDuration) == "function"
-        and type(cooldown.SetCooldownFromDurationObject) == "function" then
-        local ok, duration = pcall(C_UnitAuras.GetAuraDuration, "player", id)
-        if ok and (not readable(duration) or duration ~= nil)
-            and pcall(cooldown.SetCooldownFromDurationObject, cooldown, duration) then
-            cooldown:Show()
-            return
+    local duration, expires = auraField(aura, "duration"), auraField(aura, "expirationTime")
+    if not finite(duration) or duration <= 0 or not finite(expires) or expires <= 0
+        or type(GetTime) ~= "function" then return end
+    tile.expirationTime = expires
+    local elapsed = 1
+    local function update(self, delta)
+        elapsed = elapsed + delta
+        if elapsed < 0.2 then return end
+        elapsed = 0
+        local now = call(GetTime)
+        if not finite(now) then self.time:SetText(""); return end
+        local remaining = self.expirationTime - now
+        if remaining > 180 or remaining <= 0 then
+            self.time:SetText("")
+        else
+            local seconds = math.ceil(remaining)
+            if seconds >= 60 then self.time:SetText(string.format("%d:%02d", math.floor(seconds / 60), seconds % 60))
+            else self.time:SetText(tostring(seconds)) end
         end
     end
-    local duration, expires = auraField(aura, "duration"), auraField(aura, "expirationTime")
-    if finite(duration) and duration > 0 and finite(expires) and expires > 0
-        and type(cooldown.SetCooldown) == "function"
-        and pcall(cooldown.SetCooldown, cooldown, expires - duration, duration) then
-        cooldown:Show()
-    end
+    tile:SetScript("OnUpdate", update)
+    update(tile, 0)
 end
 
 local function refresh()
@@ -424,9 +463,12 @@ function toolbox.attachShamanBuffMonitor(hud)
         local border = tile:CreateTexture(nil, "OVERLAY")
         border:SetAllPoints(); border:SetTexture(MEDIA .. "SlotFrame.tga")
         local status = tile:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        status:SetPoint("BOTTOMRIGHT", -3, 3)
+        status:SetPoint("CENTER")
         status:SetShadowColor(0, 0, 0, 1); status:SetShadowOffset(1, -1)
-        tile.icon, tile.border, tile.status = icon, border, status
+        local time = tile:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        time:SetPoint("BOTTOM", tile, "TOP", 0, 2)
+        time:SetShadowColor(0, 0, 0, 1); time:SetShadowOffset(1, -1)
+        tile.icon, tile.border, tile.status, tile.time = icon, border, status, time
         local ok, cd = pcall(CreateFrame, "Cooldown", nil, tile, "CooldownFrameTemplate")
         if ok and cd then
             cd:SetAllPoints(icon); cd:EnableMouse(false)
