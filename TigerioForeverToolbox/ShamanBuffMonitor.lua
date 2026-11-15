@@ -193,7 +193,7 @@ end
 local function refresh()
     if not monitor then return end
     local list = watchData(false)
-    local always = list and list.displayMode == "always"
+    local always = list and list.displayMode ~= "missing"
     local visible = 0
     for _, id in ipairs(list or {}) do
         local name, icon = spellInfo(id)
@@ -216,7 +216,9 @@ local function refresh()
             elseif state == true then
                 tile.icon:SetDesaturated(false)
                 tile.border:SetVertexColor(1, 1, 1, 1)
-                tile.status:SetText("")
+                local stacks = auraField(aura, "applications")
+                tile.status:SetText(finite(stacks) and stacks >= 1 and tostring(stacks) or "")
+                tile.status:SetTextColor(1, 1, 1)
                 if always then showTime(tile, aura) end
             else
                 tile.icon:SetDesaturated(false)
@@ -237,7 +239,7 @@ end
 function toolbox.getShamanBuffDisplayMode()
     local list, err = watchData(false)
     if not list then return nil, err end
-    return list.displayMode == "always" and "always" or "missing"
+    return list.displayMode == "missing" and "missing" or "always"
 end
 
 function toolbox.setShamanBuffDisplayMode(mode)
