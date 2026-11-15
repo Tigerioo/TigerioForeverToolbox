@@ -4,6 +4,7 @@ local MEDIA = "Interface\\AddOns\\TigerioForeverToolbox\\Media\\HUD\\"
 local MAX_WATCH = 6
 local monitor
 local learnedCache = {}
+local observedAuraIDs = {}
 
 local function readable(value)
     if type(issecretvalue) ~= "function" then return true end
@@ -160,6 +161,113 @@ local function auraField(aura, key)
     if ok and readable(value) then return value end
 end
 
+-- Aura IDs may differ from the selected spell's rank. Retain IDs observed
+-- outside combat and include learned ranks with the same localized name.
+local function candidateIDs(id, name, aura)
+    local ids = {[id] = true}
+    local observed = observedAuraIDs[id] or {}
+    local auraID = auraField(aura, "spellId")
+    if validID(auraID) then observed[auraID] = true end
+    observedAuraIDs[id] = observed
+    for value in pairs(observed) do ids[value] = true end
+    local book = C_SpellBook
+    local bank = Enum and Enum.SpellBookSpellBank and Enum.SpellBookSpellBank.Player
+    local spellType = Enum and Enum.SpellBookItemType and Enum.SpellBookItemType.Spell
+    if name and type(book) == "table" and bank ~= nil and spellType ~= nil then
+        local count = call(book.GetNumSpellBookSkillLines)
+        if finite(count) and count >= 0 and count <= 200 then
+            for lineIndex = 1, count do
+                local line = call(book.GetSpellBookSkillLineInfo, lineIndex)
+                local offset, amount = auraField(line, "itemIndexOffset"), auraField(line, "numSpellBookItems")
+                if finite(offset) and offset >= 0 and finite(amount) and amount >= 0 and amount <= 1000 then
+                    for index = offset + 1, offset + amount do
+                        local item = call(book.GetSpellBookItemInfo, index, bank)
+                        local itemID = auraField(item, "spellID")
+                        if auraField(item, "name") == name and auraField(item, "itemType") == spellType
+                            and auraField(item, "isOffSpec") == false and validID(itemID) then
+                            ids[itemID] = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return ids
+end
+
+local function inCombat()
+    if type(InCombatLockdown) ~= "function" then return true end
+    local value = call(InCombatLockdown)
+    return value ~= false
+end
+
+local function nativeSlot(tile, id, name, aura)
+    if inCombat() then return tile.nativeID == id and tile.nativeReady == true end
+    local ids = candidateIDs(id, name, aura)
+    local sorted = {}
+    for value in pairs(ids) do sorted[#sorted + 1] = value end
+    table.sort(sorted)
+    local signature = table.concat(sorted, ",")
+    if tile.nativeReady then
+        if tile.nativeID == id and tile.nativeSignature == signature then return true end
+        local ok = pcall(tile.nativeContainer.SetAuraSlotCandidateFilters, tile.nativeContainer, "watch",
+            {includeSpellIDs = ids})
+        if ok then tile.nativeID, tile.nativeSignature = id, signature; return true end
+        pcall(tile.nativeContainer.Hide, tile.nativeContainer)
+        tile.nativeReady, tile.nativeID = false, nil
+        return false
+    end
+    if tile.nativeAttempted then return false end
+    tile.nativeAttempted = true
+    if C_AddOns and type(C_AddOns.IsAddOnLoaded) == "function"
+        and type(C_AddOns.LoadAddOn) == "function"
+        and call(C_AddOns.IsAddOnLoaded, "Blizzard_AuraContainer") ~= true then
+        pcall(C_AddOns.LoadAddOn, "Blizzard_AuraContainer")
+    end
+    local container
+    local ok = pcall(function()
+        local host = CreateFrame("Frame", nil, tile, "DisableUntrustedLayoutScriptsTemplate")
+        host:SetAllPoints(tile)
+        host:EnableMouse(false)
+        container = CreateFrame("AuraContainer", nil, host, "CustomAuraContainerTemplate")
+        container:SetPoint("TOPLEFT", host, "TOPLEFT")
+        assert(type(container.AddAuraSlot) == "function" and type(container.SetAuraSlotCandidateFilters) == "function")
+        local button = container:AddAuraSlot("watch", "HELPFUL", {
+            candidateFilters = {includeSpellIDs = ids},
+            initializeFrame = function(frame)
+                frame:SetAllPoints(host)
+                if type(frame.SetMouseClickEnabled) == "function" then frame:SetMouseClickEnabled(false) end
+                if type(frame.EnableMouseMotion) == "function" then frame:EnableMouseMotion(false) end
+                local image = frame:CreateTexture(nil, "ARTWORK")
+                image:SetPoint("TOPLEFT", 3, -3); image:SetPoint("BOTTOMRIGHT", -3, 3)
+                image:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+                frame:SetIcon(image)
+                local cooldown = CreateFrame("Cooldown", nil, frame, "CooldownFrameTemplate")
+                cooldown:SetAllPoints(image); cooldown:EnableMouse(false)
+                if type(cooldown.SetDrawSwipe) == "function" then cooldown:SetDrawSwipe(false) end
+                if type(cooldown.SetDrawEdge) == "function" then cooldown:SetDrawEdge(false) end
+                if type(cooldown.SetHideCountdownNumbers) == "function" then cooldown:SetHideCountdownNumbers(false) end
+                frame:SetDurationCooldown(cooldown)
+                local count = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+                count:SetPoint("BOTTOMRIGHT", -3, 3)
+                count:SetTextColor(1, 1, 1)
+                count:SetShadowColor(0, 0, 0, 1); count:SetShadowOffset(1, -1)
+                frame:SetApplicationCount(count, nil)
+            end,
+        })
+        assert(button)
+        container:SetUnit("player")
+        container:SetEnabled(true)
+        tile.nativeHost, tile.nativeContainer = host, container
+    end)
+    if not ok then
+        if container then pcall(container.Hide, container) end
+        return false
+    end
+    tile.nativeReady, tile.nativeID, tile.nativeSignature = true, id, signature
+    return true
+end
+
 local function clearTime(tile)
     local cooldown = tile.cooldown
     if not cooldown then return end
@@ -193,7 +301,7 @@ end
 local function refresh()
     if not monitor then return end
     local list = watchData(false)
-    local always = list and list.displayMode == "always"
+    local always = list and list.displayMode ~= "missing"
     local visible = 0
     for _, id in ipairs(list or {}) do
         local name, icon = spellInfo(id)
@@ -206,30 +314,47 @@ local function refresh()
         if always or state == false then
             visible = visible + 1
             local tile = monitor.tiles[visible]
-            clearTime(tile)
-            tile.icon:SetTexture(icon or "Interface\\Icons\\INV_Misc_QuestionMark")
-            if state == false then
-                tile.icon:SetDesaturated(true)
-                tile.border:SetVertexColor(1, 0.25, 0.16, 1)
-                tile.status:SetText("补")
-                tile.status:SetTextColor(1, 0.36, 0.25)
-            elseif state == true then
-                tile.icon:SetDesaturated(false)
-                tile.border:SetVertexColor(1, 1, 1, 1)
-                tile.status:SetText("")
-                if always then showTime(tile, aura) end
+            local native = always and nativeSlot(tile, id, name, aura)
+            if native then
+                if not inCombat() then
+                    tile.nativeHost:Show()
+                    clearTime(tile)
+                    tile.icon:SetTexture(icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+                    tile.icon:SetDesaturated(true)
+                    tile.border:SetVertexColor(1, 1, 1, 1)
+                    tile.status:SetText("")
+                    tile:Show()
+                end
             else
-                tile.icon:SetDesaturated(false)
-                tile.border:SetVertexColor(0.55, 0.55, 0.55, 1)
-                tile.status:SetText("?")
-                tile.status:SetTextColor(0.85, 0.85, 0.85)
+                if tile.nativeHost and not inCombat() then tile.nativeHost:Hide() end
+                clearTime(tile)
+                tile.icon:SetTexture(icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+                if state == false then
+                    tile.icon:SetDesaturated(true)
+                    tile.border:SetVertexColor(1, 0.25, 0.16, 1)
+                    tile.status:SetText("补")
+                    tile.status:SetTextColor(1, 0.36, 0.25)
+                elseif state == true then
+                    tile.icon:SetDesaturated(false)
+                    tile.border:SetVertexColor(1, 1, 1, 1)
+                    local stacks = auraField(aura, "applications")
+                    tile.status:SetText(finite(stacks) and stacks >= 1 and tostring(stacks) or "")
+                    tile.status:SetTextColor(1, 1, 1)
+                    if always then showTime(tile, aura) end
+                else
+                    tile.icon:SetDesaturated(false)
+                    tile.border:SetVertexColor(0.55, 0.55, 0.55, 1)
+                    tile.status:SetText("?")
+                    tile.status:SetTextColor(0.85, 0.85, 0.85)
+                end
+                tile:Show()
             end
-            tile:Show()
         end
     end
     for index = visible + 1, #monitor.tiles do
         local tile = monitor.tiles[index]
         clearTime(tile)
+        if tile.nativeHost and not inCombat() then tile.nativeHost:Hide() end
         tile:Hide()
     end
 end
@@ -237,7 +362,7 @@ end
 function toolbox.getShamanBuffDisplayMode()
     local list, err = watchData(false)
     if not list then return nil, err end
-    return list.displayMode == "always" and "always" or "missing"
+    return list.displayMode == "missing" and "missing" or "always"
 end
 
 function toolbox.setShamanBuffDisplayMode(mode)
