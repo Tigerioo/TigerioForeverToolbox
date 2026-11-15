@@ -59,6 +59,36 @@ local function safeFrame(frame)
     return ok and readable(forbidden) and not forbidden
 end
 
+-- Use the native edit-box arrow handling, including UTF-8 cursor movement.
+-- This is independent of the optional chat-window decoration.
+local arrowBoxes = setmetatable({}, {__mode = "k"})
+local arrowHooked = false
+local function configureChatArrows(editBox)
+    if not safeFrame(editBox) or arrowBoxes[editBox] then return end
+    local ok, applied = pcall(function()
+        if type(editBox.SetAltArrowKeyMode) ~= "function" then return false end
+        editBox:SetAltArrowKeyMode(false)
+        return true
+    end)
+    if ok and applied then arrowBoxes[editBox] = true end
+end
+
+local function discoverChatArrows()
+    if tableOK(CHAT_FRAMES) then
+        for _, name in ipairs(CHAT_FRAMES) do
+            if readable(name) and type(name) == "string" and name:match("^ChatFrame%d+$") then
+                configureChatArrows(_G[name .. "EditBox"])
+            end
+        end
+    else
+        configureChatArrows(_G.ChatFrame1EditBox)
+    end
+    -- Temporary whisper windows may be created after login, including in combat.
+    if not arrowHooked and type(hooksecurefunc) == "function" and type(ChatEdit_ActivateChat) == "function" then
+        arrowHooked = pcall(hooksecurefunc, "ChatEdit_ActivateChat", configureChatArrows)
+    end
+end
+
 local function setPieces(pieces, show)
     local success = true
     for _, texture in ipairs(pieces) do
@@ -160,6 +190,10 @@ for _, event in ipairs({"PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "PLAYER_REGEN_E
     pcall(driver.RegisterEvent, driver, event)
 end
 driver:SetScript("OnEvent", function(_, event)
+    if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD"
+        or event == "ADDON_LOADED" or event == "UPDATE_CHAT_WINDOWS" then
+        discoverChatArrows()
+    end
     if event == "PLAYER_LOGIN" then
         if init() then discover() end
         if type(toolbox.onGlobalUIChanged) == "function" then pcall(toolbox.onGlobalUIChanged) end

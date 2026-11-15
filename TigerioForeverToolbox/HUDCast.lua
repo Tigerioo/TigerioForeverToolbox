@@ -149,8 +149,8 @@ function toolbox.attachHUDCast(hud)
     local targetFrame, updateTarget
     local targetEventOK, targetEventResult = pcall(events.RegisterEvent, events, "PLAYER_TARGET_CHANGED")
     if targetEventOK and readable(targetEventResult) and targetEventResult ~= false then
-        -- Mirror the player cast bar directly under the target health panel.
-        local ok, target, targetUpdate = pcall(createCastFrame, hud, "target", 419, 116, 286)
+        -- Leave the target buff row directly below the health panel.
+        local ok, target, targetUpdate = pcall(createCastFrame, hud, "target", 419, 136, 286)
         if ok and target and type(targetUpdate) == "function" then
             targetFrame, updateTarget = target, targetUpdate
             hud.tftTargetCast = targetFrame

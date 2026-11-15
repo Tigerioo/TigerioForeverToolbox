@@ -3,9 +3,11 @@ local addonID, toolbox = ...
 local driver = CreateFrame("Frame")
 local character, controller, nativeHolder, panel, rows
 local active, elapsed, pendingStart = false, 0, false
+local hoverElapsed = 0
 local owned = {}
 local unsupportedFlyouts = {}
 local pressTextures, pressed, pressHooks = {}, {}, {}
+local cooldownFlashes, cooldownStates = {}, {}
 local REPLACEMENT_BLOCKED = false
 local MEDIA = "Interface\\AddOns\\TigerioForeverToolbox\\Media\\HUD\\SlotFrame.tga"
 local SIZE, GAP, BOTTOM, BOTTOM_WITH_ACCESSORIES = 38, 3, 8, 64
@@ -52,7 +54,8 @@ local function initialize()
     local entry = data.characters[guid]
     if entry == nil then entry = {enabled = true, rows = 1}; data.characters[guid] = entry end
     if type(entry) ~= "table" or type(entry.enabled) ~= "boolean" or type(entry.rows) ~= "number"
-        or entry.rows < 1 or entry.rows > 4 or entry.rows ~= math.floor(entry.rows) then return false end
+        or entry.rows < 1 or entry.rows > 5 or entry.rows ~= math.floor(entry.rows)
+        or (entry.hoverAll ~= nil and type(entry.hoverAll) ~= "boolean") then return false end
     character = entry
     return true
 end
@@ -161,9 +164,48 @@ local function bindingLabel(key)
     return (result:gsub("|", "||"):gsub("[\r\n]", " "))
 end
 
+-- Restricted cooldown values cannot safely be compared in Lua. Only animate
+-- when both the action identity and cooldown transition are readable.
+local function trackCooldown(button, action, kind, spellID, start, length)
+    if not readable(kind) or kind ~= "spell" or not readable(spellID)
+        or (type(spellID) ~= "number" and type(spellID) ~= "string")
+        or not readable(start) or not readable(length)
+        or type(start) ~= "number" or type(length) ~= "number"
+        or type(GetTime) ~= "function" then
+        cooldownStates[button] = nil
+        return
+    end
+    local now = call(GetTime)
+    if not readable(now) or type(now) ~= "number" then cooldownStates[button] = nil; return end
+    local previous = cooldownStates[button]
+    local same = previous and previous.action == action and previous.spellID == spellID
+    -- Compare the global cooldown when the client exposes it; otherwise be
+    -- conservative with very short timers rather than flash the entire bar.
+    local gcdStart, gcdLength = call(C_Spell and C_Spell.GetSpellCooldown or GetSpellCooldown, 61304)
+    if readable(gcdStart) and type(gcdStart) == "table" then
+        local ok, a, b = pcall(function() return gcdStart.startTime, gcdStart.duration end)
+        if ok then gcdStart, gcdLength = a, b else gcdStart, gcdLength = nil, nil end
+    end
+    local gcdKnown = readable(gcdStart) and readable(gcdLength)
+        and type(gcdStart) == "number" and type(gcdLength) == "number"
+    local isGCD = gcdKnown and gcdStart > 0 and gcdLength > 0
+        and math.abs(start - gcdStart) < 0.05 and math.abs(length - gcdLength) < 0.05
+    local running = start > 0 and length > 0 and start + length > now
+        and not isGCD and (gcdKnown or length > 1.6)
+    if running then
+        cooldownStates[button] = {action = action, spellID = spellID, ends = start + length}
+    else
+        cooldownStates[button] = nil
+        if same and previous.ends <= now + 0.15 then
+            local animation = cooldownFlashes[button]
+            if animation then pcall(animation.Stop, animation); pcall(animation.Play, animation) end
+        end
+    end
+end
+
 local function refreshButton(button)
     local action = actionID(button)
-    if not action then return end
+    if not action then cooldownStates[button] = nil; return end
     local api = C_ActionBar
     local texture = call(api and api.GetActionTexture or GetActionTexture, action)
     if not readable(texture) then
@@ -176,7 +218,7 @@ local function refreshButton(button)
     end
     -- A popup field assigned from addon Lua taints the protected action path.
     -- Until a secure flyout setup is verified, identify unsupported flyouts.
-    local kind = call(api and api.GetActionInfo or GetActionInfo, action)
+    local kind, spellID = call(api and api.GetActionInfo or GetActionInfo, action)
     local unsupported = readable(kind) and kind == "flyout"
     unsupportedFlyouts[button] = unsupported
     button.unavailableText:SetText(unsupported and "禁用" or "")
@@ -191,16 +233,17 @@ local function refreshButton(button)
         else button.icon:SetVertexColor(1, 1, 1) end
     end
     if unsupported then button.icon:SetVertexColor(0.4, 0.4, 0.4) end
+    local start, length = call(api and api.GetActionCooldown or GetActionCooldown, action)
+    if readable(start) and type(start) == "table" then
+        local ok, a, b = pcall(function() return start.startTime, start.duration end)
+        if ok then start, length = a, b else start, length = nil, nil end
+    end
+    trackCooldown(button, action, kind, spellID, start, length)
     local duration = call(api and api.GetActionCooldownDuration, action)
     if (not readable(duration) or duration ~= nil) and type(button.cooldown.SetCooldownFromDurationObject) == "function"
         and pcall(button.cooldown.SetCooldownFromDurationObject, button.cooldown, duration) then
         -- Duration objects also support restricted cooldowns.
     else
-        local start, length = call(api and api.GetActionCooldown or GetActionCooldown, action)
-        if readable(start) and type(start) == "table" then
-            local ok, a, b = pcall(function() return start.startTime, start.duration end)
-            if ok then start, length = a, b else start, length = nil, nil end
-        end
         if readable(start) and readable(length) and type(start) == "number" and type(length) == "number" then
             pcall(button.cooldown.SetCooldown, button.cooldown, start, length)
         else pcall(button.cooldown.Clear, button.cooldown) end
@@ -213,7 +256,11 @@ end
 local function refresh()
     if not active or not rows then return end
     for i, row in ipairs(rows) do
-        if i <= character.rows then for _, button in ipairs(row.buttons) do refreshButton(button) end end
+        if i <= character.rows then
+            for _, button in ipairs(row.buttons) do refreshButton(button) end
+        else
+            for _, button in ipairs(row.buttons) do cooldownStates[button] = nil end
+        end
     end
 end
 
@@ -254,6 +301,25 @@ local function makeButton(row, rowIndex, index)
     border:SetAllPoints(button); border:SetTexture(MEDIA)
     local cooldown = CreateFrame("Cooldown", nil, button, "CooldownFrameTemplate")
     cooldown:SetAllPoints(icon)
+    local flash
+    local flashOK = pcall(function()
+        flash = button:CreateTexture(nil, "OVERLAY", nil, 7)
+        flash:Hide()
+        flash:SetPoint("CENTER", button, "CENTER")
+        flash:SetSize(SIZE * 1.4, SIZE * 1.4)
+        flash:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
+        flash:SetBlendMode("ADD")
+        local animation = flash:CreateAnimationGroup()
+        animation:SetScript("OnPlay", function() flash:Show() end)
+        animation:SetScript("OnFinished", function() flash:Hide() end)
+        animation:SetScript("OnStop", function() flash:Hide() end)
+        local alpha = animation:CreateAnimation("Alpha")
+        alpha:SetFromAlpha(0.85); alpha:SetToAlpha(0); alpha:SetDuration(0.45)
+        local scale = animation:CreateAnimation("Scale")
+        scale:SetScale(1.35, 1.35); scale:SetDuration(0.45)
+        cooldownFlashes[button] = animation
+    end)
+    if not flashOK and flash then pcall(flash.Hide, flash) end
     local count = button:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
     count:SetPoint("BOTTOMRIGHT", -2, 2)
     local hotkey = button:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
@@ -415,8 +481,41 @@ local function updateRows()
     for r, row in ipairs(rows) do
         local show = r <= character.rows
         -- Invisible rows must not intercept mouse input.
-        row:SetAlpha(show and 1 or 0)
+        local hover = r <= 5 and character.hoverAll == true
+        row:SetAlpha(show and (hover and 0 or 1) or 0)
+        if r <= 5 then row:EnableMouse(not not (show and hover)) end
         for _, button in ipairs(row.buttons) do button:EnableMouse(show) end
+    end
+end
+
+local function refreshHover()
+    if not active or not rows or not character or character.hoverAll ~= true then return end
+    local hover, known = false, false
+    local function check(frame)
+        if type(frame.IsMouseOver) == "function" then
+            local ok, value = pcall(frame.IsMouseOver, frame)
+            if ok and readable(value) and type(value) == "boolean" then
+                known = true
+                if value then hover = true end
+            end
+        end
+    end
+    for index = 1, character.rows do
+        local row = rows[index]
+        check(row)
+        if not hover then
+            for _, button in ipairs(row.buttons) do check(button); if hover then break end end
+        end
+        if hover then break end
+    end
+    -- If the client cannot report hover, keep every enabled row available.
+    local alpha = (hover or not known) and 1 or 0
+    for index = 1, character.rows do
+        local row = rows[index]
+        local ok, currentAlpha = pcall(row.GetAlpha, row)
+        if not ok or not readable(currentAlpha) or currentAlpha ~= alpha then
+            pcall(row.SetAlpha, row, alpha)
+        end
     end
 end
 
@@ -782,6 +881,21 @@ function toolbox.getActionBarLayoutRows()
     return character.rows
 end
 
+function toolbox.getActionBarHoverAll()
+    if not current() then return nil, "动作条设置暂不可用" end
+    return character.hoverAll == true
+end
+
+function toolbox.setActionBarHoverAll(value)
+    if type(value) ~= "boolean" then return false, "设置无效" end
+    if not current() then return false, "动作条设置暂不可用" end
+    if locked() then return false, "请在脱战后调整动作条" end
+    character.hoverAll = value
+    if rows then updateRows(); refreshHover() end
+    notify()
+    return true
+end
+
 function toolbox.setActionBarLayoutEnabled(value)
     if type(value) ~= "boolean" then return false, "设置无效" end
     if not current() then return false, "动作条设置暂不可用" end
@@ -799,7 +913,7 @@ function toolbox.setActionBarLayoutEnabled(value)
 end
 
 function toolbox.setActionBarLayoutRows(value)
-    if type(value) ~= "number" or value < 1 or value > 4 or value ~= math.floor(value) then return false, "行数无效" end
+    if type(value) ~= "number" or value < 1 or value > 5 or value ~= math.floor(value) then return false, "行数无效" end
     if not current() then return false, "动作条设置暂不可用" end
     if REPLACEMENT_BLOCKED then return false, "独立动作条暂不可用" end
     if locked() then return false, "请在脱战后调整动作条" end
@@ -848,6 +962,8 @@ driver:SetScript("OnEvent", function(_, event)
 end)
 driver:SetScript("OnUpdate", function(_, delta)
     if not active then return end
+    hoverElapsed = hoverElapsed + delta
+    if hoverElapsed >= 0.1 then hoverElapsed = 0; refreshHover() end
     if next(pressed) and panel and type(panel.IsVisible) == "function" then
         local ok, visible = pcall(panel.IsVisible, panel)
         if not ok or not readable(visible) or visible ~= true then clearPressed() end

@@ -8,6 +8,11 @@
 
 NativeUI.lua
 Calendar.lua
+Telemetry.lua
+MailRecipientsData.lua
+MailRecipientsUI.lua
+ProfessionProgress.lua
+ProfessionProgressUI.lua
 PlayedTime.lua
 GearHints.lua
 GearPopup.lua
@@ -28,13 +33,21 @@ CompanionCore.lua
 CompanionUI.lua
 HUDCast.lua
 HUDTargetState.lua
+TargetOfTarget.lua
 HUDCombo.lua
+ShamanBuffMonitor.lua
+WarriorStance.lua
 HUDRuntime.lua
+FocusDetails.lua
+FocusFrame.lua
 HUDConfig.lua
+ShamanBuffConfig.lua
 ActionBarStyle.lua
 ActionBarRows.lua
 MapButtons.lua
 MapStyle.lua
+BagCooldown.lua
+TopBuffScale.lua
 ChatStyle.lua
 GroupStyle.lua
 PartyFrames.lua

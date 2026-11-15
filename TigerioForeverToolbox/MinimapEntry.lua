@@ -8,7 +8,7 @@ local pages = {
     "TigerioForeverToolboxFrame", "TigerioForeverToolboxDungeonGuide",
     "TigerioForeverToolboxWeaponMasters", "TigerioForeverToolboxLuckFrame",
     "TigerioForeverToolboxCompanionsFrame", "TigerioForeverToolboxHUDSettings",
-    "TigerioForeverToolboxChangelog",
+    "TigerioForeverToolboxChangelog", "TigerioForeverToolboxProfessionProgress",
 }
 
 local function openConfig()

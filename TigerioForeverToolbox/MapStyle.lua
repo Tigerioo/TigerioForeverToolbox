@@ -610,3 +610,65 @@ driver:SetScript("OnEvent", function(_, event)
         if entry then applyStyle(enabled(entry)) end
     end
 end)
+
+-- The world map uses a separate group provider from minimaps and other maps.
+-- Adjust only its party size; the provider retains it across map refreshes.
+local worldMapDriver = CreateFrame("Frame")
+local hookedWorldMap
+local rosterRefreshPending = false
+local adjustedPartyProviders = setmetatable({}, {__mode = "k"})
+local function enlargeWorldMapParty()
+    if combat() then return end
+    local map = _G.WorldMapFrame
+    if not map or type(map.EnumeratePinsByTemplate) ~= "function" then return end
+    pcall(function()
+        for pin in map:EnumeratePinsByTemplate("GroupMembersPinTemplate") do
+            local provider = pin.dataProvider
+            if provider and not adjustedPartyProviders[provider]
+                and type(provider.GetMap) == "function" and provider:GetMap() == map
+                and type(provider.GetUnitPinSizesTable) == "function"
+                and type(provider.SetUnitPinSize) == "function"
+                and type(pin.SynchronizePinSizes) == "function" then
+                local sizes = provider:GetUnitPinSizesTable()
+                local size = sizes and sizes.party
+                if readable(size) and type(size) == "number" and size > 0 then
+                    provider:SetUnitPinSize("party", size * 1.5)
+                    adjustedPartyProviders[provider] = true
+                    pin:SynchronizePinSizes()
+                end
+            end
+        end
+    end)
+end
+
+local function setupWorldMapParty()
+    if combat() then return end
+    local map = _G.WorldMapFrame
+    if not map then return end
+    if map ~= hookedWorldMap and type(map.HookScript) == "function" then
+        local ok = pcall(map.HookScript, map, "OnShow", enlargeWorldMapParty)
+        if ok then hookedWorldMap = map end
+    end
+    enlargeWorldMapParty()
+end
+
+worldMapDriver:RegisterEvent("PLAYER_ENTERING_WORLD")
+worldMapDriver:RegisterEvent("PLAYER_REGEN_ENABLED")
+worldMapDriver:RegisterEvent("ADDON_LOADED")
+worldMapDriver:RegisterEvent("GROUP_ROSTER_UPDATE")
+worldMapDriver:SetScript("OnEvent", function(_, event, name)
+    if event == "GROUP_ROSTER_UPDATE" then
+        if rosterRefreshPending then return end
+        rosterRefreshPending = true
+        local function refresh()
+            rosterRefreshPending = false
+            setupWorldMapParty()
+        end
+        if C_Timer and type(C_Timer.After) == "function" and pcall(C_Timer.After, 0, refresh) then return end
+        refresh()
+        return
+    end
+    if event ~= "ADDON_LOADED" or name == "Blizzard_WorldMap" then
+        setupWorldMapParty()
+    end
+end)

@@ -228,8 +228,17 @@ local function updateNativeFrames(replace, keepCast)
         nativeHider = holder
     end
     local complete = castOK
-    for _, name in ipairs({"PlayerFrame", "TargetFrame"}) do
-        local frame = _G[name]
+    local nativeFrames = {
+        {name = "PlayerFrame", parent = UIParent},
+        {name = "TargetFrame", parent = UIParent},
+    }
+    local _, class = call(UnitClass, "player")
+    if readable(class) and class == "SHAMAN" then
+        -- This is the native totem timer, not the secure MultiCast action bar.
+        nativeFrames[#nativeFrames + 1] = {name = "TotemFrame", parent = _G.PlayerFrame, optional = true}
+    end
+    for _, definition in ipairs(nativeFrames) do
+        local frame = _G[definition.name]
         if frame then
             local ok, parent, forbidden = pcall(function()
                 return frame:GetParent(), type(frame.IsForbidden) == "function" and frame:IsForbidden()
@@ -246,7 +255,7 @@ local function updateNativeFrames(replace, keepCast)
                     nativeDisowned[frame] = true
                     complete = false
                 end
-            elseif not nativeDisowned[frame] and parent == UIParent then
+            elseif not nativeDisowned[frame] and definition.parent and parent == definition.parent then
                 local changed = pcall(frame.SetParent, frame, nativeHider)
                 local verified, actual = pcall(frame.GetParent, frame)
                 if changed and verified and readable(actual) and actual == nativeHider then
@@ -261,7 +270,7 @@ local function updateNativeFrames(replace, keepCast)
                 -- A third party controls this frame; do not change its parent.
                 complete = false
             end
-        else
+        elseif not definition.optional then
             complete = false
         end
     end
@@ -307,7 +316,40 @@ local function healthBar(parent, unit, x)
     bar:SetStatusBarColor(1, 1, 1, 1)
     bar:SetMinMaxValues(0, 1)
     bar:SetValue(0)
-    local caption = font(bar, "GameFontHighlightSmall")
+    -- The client can render protected healing values inside a StatusBar.
+    -- Attach the prediction to the end of the real fill instead of calculating
+    -- pixel widths from health values in Lua.
+    local textLayer = bar
+    if type(CreateUnitHealPredictionCalculator) == "function"
+        and type(UnitGetDetailedHealPrediction) == "function"
+        and Enum and Enum.UnitIncomingHealClampMode
+        and type(Enum.UnitIncomingHealClampMode.MissingHealth) == "number" then
+        local prediction, layer
+        local ok = pcall(function()
+            local calculator = CreateUnitHealPredictionCalculator()
+            calculator:SetIncomingHealClampMode(Enum.UnitIncomingHealClampMode.MissingHealth)
+            calculator:SetIncomingHealOverflowPercent(1)
+            local filled = bar:GetStatusBarTexture()
+            if not filled then error("health texture unavailable") end
+            prediction = CreateFrame("StatusBar", nil, bar)
+            prediction:EnableMouse(false)
+            prediction:SetPoint("TOPLEFT", filled, "TOPRIGHT")
+            prediction:SetPoint("BOTTOMLEFT", filled, "BOTTOMRIGHT")
+            prediction:SetWidth(276)
+            prediction:SetStatusBarTexture(MEDIA .. "BarFill.tga")
+            prediction:SetStatusBarColor(0.35, 1, 0.55, 0.65)
+            prediction:SetMinMaxValues(0, 1)
+            prediction:SetValue(0)
+            layer = CreateFrame("Frame", nil, bar)
+            layer:EnableMouse(false)
+            layer:SetAllPoints(bar)
+            layer:SetFrameLevel(prediction:GetFrameLevel() + 1)
+            bar.healPrediction, bar.healCalculator = prediction, calculator
+        end)
+        if ok then textLayer = layer
+        elseif prediction then pcall(prediction.Hide, prediction) end
+    end
+    local caption = font(textLayer, "GameFontHighlightSmall")
     caption:SetPoint(unit == "player" and "LEFT" or "RIGHT", bar, unit == "player" and "LEFT" or "RIGHT", unit == "player" and 8 or -8, 0)
     caption:SetWidth(96)
     caption:SetJustifyH(unit == "player" and "LEFT" or "RIGHT")
@@ -317,17 +359,27 @@ local function healthBar(parent, unit, x)
     caption:SetShadowColor(0, 0, 0, 1)
     caption:SetShadowOffset(1, -1)
     bar.nameLabel = caption
-    bar.text = font(bar)
+    bar.text = font(textLayer)
     bar.text:SetPoint(unit == "player" and "RIGHT" or "LEFT", bar,
         unit == "player" and "RIGHT" or "LEFT", unit == "player" and -10 or 10, 0)
     bar.text:SetText(unit == "target" and "" or "—")
-    local level = font(bar, "GameFontNormalSmall")
+    local level = font(textLayer, "GameFontNormalSmall")
     level:SetPoint(unit == "player" and "TOPLEFT" or "TOPRIGHT", bar,
         unit == "player" and "TOPLEFT" or "TOPRIGHT", unit == "player" and 5 or -5, -1)
     level:SetText("")
     level:SetShadowColor(0, 0, 0, 1)
     level:SetShadowOffset(1, -1)
     bar.levelLabel = level
+    if bar.healPrediction then
+        local amount = font(textLayer, "GameFontHighlightSmall")
+        amount:SetPoint("CENTER", bar, "CENTER", 0, 0)
+        amount:SetWidth(80)
+        amount:SetTextColor(0.72, 1, 0.75, 1)
+        amount:SetShadowColor(0, 0, 0, 1)
+        amount:SetShadowOffset(1, -1)
+        amount:SetText("")
+        bar.healAmount = amount
+    end
     -- Keep targeting and the native unit menu in the secure click handler.
     local button = CreateFrame("Button", nil, panel, "SecureUnitButtonTemplate")
     button:SetAllPoints(panel)
@@ -395,10 +447,10 @@ end
 -- Totem positions follow the character-facing Classic layout: fire/earth in
 -- front and air/water behind. Unreadable client values are never guessed.
 local TOTEM_POSITIONS = {
-    {slot = 1, x = -58, y = 58, color = {1, 0.45, 0.20}}, -- fire: front left
-    {slot = 2, x = 58, y = 58, color = {0.75, 0.66, 0.48}}, -- earth: front right
-    {slot = 4, x = -58, y = -58, color = {0.65, 0.75, 0.80}}, -- air: back left
-    {slot = 3, x = 58, y = -58, color = {0.32, 0.65, 1}}, -- water: back right
+    {slot = 1, x = -58, y = 58, text = "火", color = {1, 0.45, 0.20}}, -- fire: front left
+    {slot = 2, x = 58, y = 58, text = "土", color = {0.75, 0.66, 0.48}}, -- earth: front right
+    {slot = 4, x = -58, y = -58, text = "风", color = {0.65, 0.75, 0.80}}, -- air: back left
+    {slot = 3, x = 58, y = -58, text = "水", color = {0.32, 0.65, 1}}, -- water: back right
 }
 
 local function createTotemMonitor(ball)
@@ -411,11 +463,16 @@ local function createTotemMonitor(ball)
         if type(tile.SetFrameLevel) == "function" and type(ball.fill.GetFrameLevel) == "function" then
             tile:SetFrameLevel(ball.fill:GetFrameLevel() + 3)
         end
-        local glyph = tile:CreateTexture(nil, "BACKGROUND")
+        local empty = tile:CreateTexture(nil, "BACKGROUND")
+        empty:SetAllPoints()
+        empty:SetTexture(MEDIA .. "OrbFill.tga")
+        empty:SetVertexColor(0.16, 0.16, 0.16, 1)
+        local glyph = tile:CreateTexture(nil, "BACKGROUND", nil, 1)
         glyph:SetAllPoints()
         glyph:SetTexture(MEDIA .. "TotemGlyphs.tga")
         -- Half-pixel inset prevents adjacent elements bleeding into the slot.
         glyph:SetTexCoord((index - 1) / 4 + 0.5 / 256, index / 4 - 0.5 / 256, 0, 1)
+        glyph:Hide()
         local icon = tile:CreateTexture(nil, "ARTWORK")
         icon:SetPoint("TOPLEFT", 3, -3); icon:SetPoint("BOTTOMRIGHT", -3, 3)
         icon:SetTexCoord(0.06, 0.94, 0.06, 0.94)
@@ -433,6 +490,12 @@ local function createTotemMonitor(ball)
         icon:Hide()
         local rim = tile:CreateTexture(nil, "OVERLAY")
         rim:SetAllPoints(); rim:SetTexture(MEDIA .. "OrbRing.tga")
+        local placeholder = font(tile, "GameFontNormalLarge")
+        placeholder:SetPoint("CENTER")
+        placeholder:SetText(position.text)
+        placeholder:SetTextColor(0.72, 0.72, 0.72, 1)
+        placeholder:SetShadowColor(0, 0, 0, 1)
+        placeholder:SetShadowOffset(1, -1)
         local timer = font(tile, "GameFontHighlightSmall")
         timer:SetSize(40, 10)
         timer:SetPoint(position.y > 0 and "BOTTOM" or "TOP", tile,
@@ -442,10 +505,146 @@ local function createTotemMonitor(ball)
         timer:SetShadowOffset(1, -1)
         timer:SetText("")
         tile:Hide()
-        slots[#slots + 1] = {index = position.slot, frame = tile, glyph = glyph, icon = icon,
+        slots[#slots + 1] = {index = position.slot, frame = tile, glyph = glyph, icon = icon, placeholder = placeholder,
             rim = rim, timer = timer, masked = masked, color = position.color}
     end
     return slots
+end
+
+-- Keep the secure hover targets separate from the visual totem tiles: those
+-- tiles are refreshed in combat and must not acquire protected children.
+local function createTotemFlyouts(ball)
+    if type(GetMultiCastTotemSpells) ~= "function" then return nil end
+    local flyouts = {}
+    for _, position in ipairs(TOTEM_POSITIONS) do
+        local handle = CreateFrame("Frame", nil, ball, "SecureHandlerEnterLeaveTemplate")
+        handle:SetSize(56, 56)
+        handle:SetPoint("CENTER", ball, "CENTER", position.x, position.y)
+        -- The handles remain inert until all optional secure setup succeeds.
+        handle:EnableMouse(false)
+        handle:SetFrameLevel(ball.fill:GetFrameLevel() + 5)
+        local popup = CreateFrame("Frame", nil, ball, "SecureHandlerBaseTemplate")
+        popup:SetFrameLevel(handle:GetFrameLevel() + 1)
+        popup:EnableMouse(true)
+        popup:Hide()
+        handle:SetFrameRef("totemFlyout", popup)
+        handle:SetAttribute("_onenter", [[
+            if self:GetAttribute("hasSpells") then
+                local popup = self:GetFrameRef("totemFlyout")
+                if popup then
+                    popup:Show()
+                    popup:RegisterAutoHide(0.35)
+                    popup:AddToAutoHide(self)
+                end
+            end
+        ]])
+        flyouts[#flyouts + 1] = {slot = position.slot, upward = position.y > 0,
+            handle = handle, popup = popup, buttons = {}}
+    end
+    return flyouts
+end
+
+local function packValues(...) return {n = select("#", ...), ...} end
+
+local function refreshTotemFlyouts(frame)
+    if not frame or not frame.totemFlyouts or combat() then return end
+    local topFlyoutHeight = 0
+    for _, flyout in ipairs(frame.totemFlyouts) do
+        local result = packValues(pcall(GetMultiCastTotemSpells, flyout.slot))
+        -- A secret or otherwise invalid value does not prove the element has
+        -- no spells; keep the last secure configuration until it is readable.
+        local known, spells = result[1], {}
+        if known then
+            for i = 2, result.n do
+                local id = result[i]
+                if finite(id) and id > 0 and id == math.floor(id) then
+                    spells[#spells + 1] = id
+                else
+                    known = false
+                    break
+                end
+            end
+        end
+        if known then
+            flyout.popup:Hide()
+            local size, gap, columns = 36, 2, math.min(2, math.max(1, #spells))
+            local rows = math.max(1, math.ceil(#spells / columns))
+            flyout.height = #spells > 0 and (rows * size + (rows - 1) * gap) or 0
+            flyout.popup:SetSize(columns * size + (columns - 1) * gap, rows * size + (rows - 1) * gap)
+            flyout.popup:ClearAllPoints()
+            flyout.popup:SetPoint(flyout.upward and "BOTTOM" or "TOP", flyout.handle,
+                flyout.upward and "TOP" or "BOTTOM", 0, 0)
+            for i, id in ipairs(spells) do
+                local button = flyout.buttons[i]
+                if not button then
+                    button = CreateFrame("Button", nil, flyout.popup, "SecureActionButtonTemplate")
+                    button:SetSize(size, size)
+                    button:RegisterForClicks("AnyUp", "AnyDown")
+                    local background = button:CreateTexture(nil, "BACKGROUND")
+                    background:SetAllPoints(); background:SetTexture(MEDIA .. "SlotEmpty.tga")
+                    local icon = button:CreateTexture(nil, "ARTWORK")
+                    icon:SetPoint("TOPLEFT", 3, -3); icon:SetPoint("BOTTOMRIGHT", -3, 3)
+                    icon:SetTexCoord(0.06, 0.94, 0.06, 0.94)
+                    local rim = button:CreateTexture(nil, "OVERLAY")
+                    rim:SetAllPoints(); rim:SetTexture(MEDIA .. "SlotFrame.tga")
+                    local pushed = button:CreateTexture(nil, "ARTWORK", nil, 6)
+                    pushed:SetAllPoints(icon); pushed:SetColorTexture(0, 0, 0, 0.42)
+                    button:SetPushedTexture(pushed)
+                    button.icon = icon
+                    local cooldown = CreateFrame("Cooldown", nil, button, "CooldownFrameTemplate")
+                    cooldown:SetAllPoints(icon)
+                    cooldown:SetDrawEdge(false)
+                    cooldown:SetHideCountdownNumbers(false)
+                    cooldown:EnableMouse(false)
+                    button.cooldown = cooldown
+                    button:SetScript("OnEnter", function(self)
+                        if GameTooltip and self.spellID then
+                            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                            GameTooltip:SetSpellByID(self.spellID)
+                            GameTooltip:Show()
+                        end
+                    end)
+                    button:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+                    flyout.buttons[i] = button
+                end
+                local col, row = (i - 1) % columns, math.floor((i - 1) / columns)
+                button:ClearAllPoints()
+                button:SetPoint(flyout.upward and "BOTTOMLEFT" or "TOPLEFT", flyout.popup,
+                    flyout.upward and "BOTTOMLEFT" or "TOPLEFT", col * (size + gap),
+                    (flyout.upward and 1 or -1) * row * (size + gap))
+                local texture = C_Spell and call(C_Spell.GetSpellTexture, id) or call(GetSpellTexture, id)
+                if readable(texture) then button.icon:SetTexture(texture) end
+                button.spellID = id
+                button:SetAttribute("type1", "spell")
+                button:SetAttribute("spell1", id)
+                button:Show()
+            end
+            for i = #spells + 1, #flyout.buttons do
+                local button = flyout.buttons[i]
+                button:SetAttribute("type1", nil); button:SetAttribute("spell1", nil)
+                button.spellID = nil; button:Hide()
+            end
+            flyout.handle:SetAttribute("hasSpells", #spells > 0)
+        end
+        if flyout.upward then topFlyoutHeight = math.max(topFlyoutHeight, flyout.height or 0) end
+    end
+    if frame.imbueWarning then
+        -- Leave room above both top flyouts for the weapon imbue warning.
+        frame.imbueWarning:ClearAllPoints()
+        frame.imbueWarning:SetPoint("BOTTOM", frame, "TOP", 0, math.max(30, topFlyoutHeight + 4))
+        if type(frame.SetClampRectInsets) == "function" then
+            pcall(frame.SetClampRectInsets, frame, -15, 15, math.max(50, topFlyoutHeight + 26), -32)
+        end
+    end
+end
+
+local function safeRefreshTotemFlyouts(frame)
+    if not frame or not frame.totemFlyouts or combat() then return end
+    local ok = pcall(refreshTotemFlyouts, frame)
+    for _, flyout in ipairs(frame.totemFlyouts) do
+        pcall(flyout.handle.EnableMouse, flyout.handle, ok)
+        if not ok then pcall(flyout.popup.Hide, flyout.popup) end
+    end
 end
 
 local function updateTotemTimers(frame)
@@ -465,24 +664,55 @@ local function updateTotemTimers(frame)
     end
 end
 
+-- The client can render secret totem state without revealing it to Lua.
+-- Never branch on that state; both values go straight to supported widgets.
+local function renderRestrictedTotem(slot, exists, icon, iconPlaceholder)
+    local empty = iconPlaceholder and slot.glyph or slot.placeholder
+    local other = iconPlaceholder and slot.placeholder or slot.glyph
+    if not slot.masked or type(slot.icon.SetAlphaFromBoolean) ~= "function"
+        or type(empty.SetAlphaFromBoolean) ~= "function" then return false end
+    if readable(exists) and type(exists) ~= "boolean" then return false end
+    if readable(icon) and type(icon) ~= "number" and type(icon) ~= "string" then return false end
+    local ok, applied = pcall(slot.icon.SetTexture, slot.icon, icon)
+    if not ok or (readable(applied) and applied == false) then return false end
+    local iconOK = pcall(slot.icon.SetAlphaFromBoolean, slot.icon, exists, 1, 0)
+    local labelOK = pcall(empty.SetAlphaFromBoolean, empty, exists, 0, 1)
+    if not iconOK or not labelOK then return false end
+    slot.finish = nil
+    other:Hide()
+    if iconPlaceholder then slot.glyph:SetVertexColor(1, 1, 1, 1) end
+    slot.icon:Show()
+    empty:Show()
+    slot.rim:SetVertexColor(1, 1, 1, 1)
+    slot.frame:Show()
+    return true
+end
+
 local function updateTotems(frame)
     if not frame or not frame.totems then return end
     local _, class = call(UnitClass, "player")
     local isShaman = readable(class) and class == "SHAMAN"
     local available = isShaman and type(GetTotemInfo) == "function"
+    local iconPlaceholder = character and character.totemPlaceholderStyle == "icon"
     for _, slot in ipairs(frame.totems) do
         local ok, exists, _, start, duration, icon
         if available then ok, exists, _, start, duration, icon = pcall(GetTotemInfo, slot.index) end
-        if ok and readable(exists) and exists == true and readable(icon)
+        local restricted = ok and (not readable(exists) or not readable(icon))
+        if restricted and renderRestrictedTotem(slot, exists, icon, iconPlaceholder) then
+            -- Visibility is controlled by the client, not by Lua.
+        elseif ok and readable(exists) and exists == true and readable(icon)
             and (type(icon) == "number" or type(icon) == "string") then
+            slot.icon:SetAlpha(1); slot.placeholder:SetAlpha(1); slot.glyph:SetAlpha(1)
             if slot.masked then
                 slot.icon:SetTexture(icon)
                 slot.icon:Show()
-                slot.glyph:SetVertexColor(1, 1, 1, 1)
+                slot.glyph:Hide()
             else
                 slot.icon:Hide()
                 slot.glyph:SetVertexColor(slot.color[1], slot.color[2], slot.color[3], 1)
+                slot.glyph:Show()
             end
+            slot.placeholder:Hide()
             slot.rim:SetVertexColor(1, 1, 1, 1)
             if finite(start) and finite(duration) and duration > 0 then
                 local finish = start + duration
@@ -492,18 +722,149 @@ local function updateTotems(frame)
             end
             slot.frame:Show()
         else
+            slot.icon:SetAlpha(1); slot.placeholder:SetAlpha(1); slot.glyph:SetAlpha(1)
             slot.finish = nil
             slot.icon:Hide()
             if isShaman then
-                slot.glyph:SetVertexColor(1, 1, 1, 1)
+                if iconPlaceholder then
+                    slot.glyph:SetVertexColor(1, 1, 1, 1)
+                    slot.glyph:Show(); slot.placeholder:Hide()
+                else
+                    slot.glyph:Hide(); slot.placeholder:Show()
+                end
                 slot.rim:SetVertexColor(0.8, 0.8, 0.8, 1)
                 slot.frame:Show()
             else
+                slot.glyph:Hide(); slot.placeholder:Hide()
                 slot.frame:Hide()
             end
         end
     end
     updateTotemTimers(frame)
+end
+
+-- Totem state may arrive after the event or spell success. Re-read only the
+-- client's confirmed state, for a short window; never predict a totem icon.
+local totemRetry, totemRetryTimes = nil, {0.05, 0.15, 0.35, 0.75, 1.5, 2.5}
+local function scheduleTotemRefresh(frame)
+    if not frame or not frame.totems or not frame:IsShown() then return end
+    local _, class = call(UnitClass, "player")
+    if not readable(class) or class ~= "SHAMAN" then return end
+    updateTotems(frame)
+    totemRetry = {frame = frame, elapsed = 0, next = 1}
+end
+
+local function advanceTotemRefresh(frame, elapsed)
+    local retry = totemRetry
+    if not retry then return end
+    if retry.frame ~= frame or not frame:IsShown() then totemRetry = nil; return end
+    retry.elapsed = retry.elapsed + elapsed
+    if retry.elapsed < totemRetryTimes[retry.next] then return end
+    updateTotems(frame)
+    repeat retry.next = retry.next + 1
+    until not totemRetryTimes[retry.next] or retry.elapsed < totemRetryTimes[retry.next]
+    if not totemRetryTimes[retry.next] then totemRetry = nil end
+end
+
+local function isKnownTotemSpell(frame, spellID)
+    if not frame or not frame.totemFlyouts or not finite(spellID) then return false end
+    for _, flyout in ipairs(frame.totemFlyouts) do
+        for _, button in ipairs(flyout.buttons) do
+            if finite(button.spellID) and button.spellID == spellID then return true end
+        end
+    end
+    return false
+end
+
+-- Forever keeps a shaman's imbue separately from other temporary enchants.
+-- Treat missing, restricted or uncached client data as unknown, not missing.
+local IMBUE_SPELLS = {
+    8017, 8018, 8019, 10399, 16314, 16315, 16316, -- Rockbiter
+    8024, 8027, 8030, 16339, 16341, 16342, -- Flametongue
+    8033, 8038, 10456, 16355, 16356, -- Frostbrand
+    8232, 8235, 10486, 16362, -- Windfury
+}
+
+local function imbueKnown()
+    local lookup = C_SpellBook and C_SpellBook.IsSpellKnown or IsPlayerSpell or IsSpellKnown
+    if type(lookup) ~= "function" then return false end
+    for _, spellID in ipairs(IMBUE_SPELLS) do
+        local ok, known = pcall(lookup, spellID)
+        if ok and readable(known) and known == true then return true end
+    end
+    return false
+end
+
+local function equippedImbueWeapon(slot)
+    if type(GetInventoryItemID) ~= "function" then return nil end
+    local ok, id = pcall(GetInventoryItemID, "player", slot)
+    if not ok or not readable(id) then return nil end
+    if id == nil then return false end
+    if type(id) ~= "number" or id <= 0 then return nil end
+    local lookup = C_Item and C_Item.GetItemInfoInstant or GetItemInfoInstant
+    if type(lookup) ~= "function" then return nil end
+    local got, _, _, _, equipLoc, _, classID, subClassID = pcall(lookup, id)
+    if not got or not readable(equipLoc) or not readable(classID) or not readable(subClassID)
+        or type(equipLoc) ~= "string" or type(classID) ~= "number" or type(subClassID) ~= "number" then return nil end
+    if classID ~= 2 or subClassID == 20 then return false end -- shields, held items and fishing poles
+    if slot == 16 then
+        return equipLoc == "INVTYPE_WEAPON" or equipLoc == "INVTYPE_WEAPONMAINHAND" or equipLoc == "INVTYPE_2HWEAPON"
+    end
+    return equipLoc == "INVTYPE_WEAPON" or equipLoc == "INVTYPE_WEAPONOFFHAND"
+end
+
+local function hasShamanImbue(slot)
+    local weaponSlots = Enum and Enum.WeaponSlot
+    local enchantTypes = Enum and Enum.ItemEnchantType
+    local slotKey = type(weaponSlots) == "table" and (slot == 16 and weaponSlots.MainHand or weaponSlots.OffHand)
+    local imbueType = type(enchantTypes) == "table" and enchantTypes.Imbue
+    local lookup = C_Item and C_Item.GetWeaponEnchantInfo
+    if type(lookup) == "function" and type(slotKey) == "number" and type(imbueType) == "number" then
+        local ok, list = pcall(lookup, slotKey)
+        if not ok or not readable(list) or type(list) ~= "table" then return nil end
+        if type(canaccesstable) == "function" then
+            local checked, accessible = pcall(canaccesstable, list)
+            if not checked or not readable(accessible) or accessible ~= true then return nil end
+        end
+        local scanned, result = pcall(function()
+            local unknown = false
+            for _, enchant in ipairs(list) do
+                if not readable(enchant) or type(enchant) ~= "table" then
+                    unknown = true
+                else
+                    local kind, active = enchant.enchantType, enchant.hasEnchant
+                    if not readable(kind) or not readable(active) or type(kind) ~= "number" or type(active) ~= "boolean" then
+                        unknown = true
+                    elseif kind == imbueType and active then
+                        return true
+                    end
+                end
+            end
+            if unknown then return nil end
+            return false
+        end)
+        if scanned then return result end
+        return nil
+    end
+    -- Older clients expose only an aggregate flag. A false flag proves there
+    -- is no imbue; a true flag may be another temporary weapon effect.
+    if type(GetWeaponEnchantInfo) ~= "function" then return nil end
+    local ok, main, _, _, _, off = pcall(GetWeaponEnchantInfo)
+    local active
+    if slot == 16 then active = main else active = off end
+    if not ok or not readable(active) then return nil end
+    if active == nil or active == false then return false end
+    if active == true or active == 1 then return true end
+    return nil
+end
+
+local function updateImbueWarning(frame)
+    if not frame or not frame.imbueWarning then return end
+    if not imbueKnown() then frame.imbueWarning:SetText(""); return end
+    local main = equippedImbueWeapon(16) == true and hasShamanImbue(16) == false
+    local off = equippedImbueWeapon(17) == true and hasShamanImbue(17) == false
+    local text = main and off and "主手、副手武器未强化" or main and "主手武器未强化" or off and "副手武器未强化" or ""
+    frame.imbueWarning:SetText(text)
 end
 
 local function percent(current, maximum)
@@ -652,9 +1013,40 @@ local function updateUnitName(label, unit)
     label:SetText(name)
 end
 
+local function clearHealthPrediction(bar)
+    if bar.healPrediction then pcall(bar.healPrediction.SetValue, bar.healPrediction, 0) end
+    if bar.healAmount then bar.healAmount:SetText("") end
+end
+
+local function updateHealthPrediction(bar, unit)
+    local prediction, calculator = bar.healPrediction, bar.healCalculator
+    if not prediction or not calculator then return end
+    local ok, own, maximum, raw = pcall(function()
+        UnitGetDetailedHealPrediction(unit, "player", calculator)
+        local _, fromPlayer = calculator:GetIncomingHeals()
+        local raw
+        if type(calculator.GetTotalIncomingHealsFromHealer) == "function" then
+            raw = calculator:GetTotalIncomingHealsFromHealer()
+        end
+        return fromPlayer, calculator:GetMaximumHealth(), raw
+    end)
+    if not ok then clearHealthPrediction(bar); return end
+    -- Values may be secret; only the native StatusBar consumes these directly.
+    if not pcall(function() prediction:SetMinMaxValues(0, maximum); prediction:SetValue(own) end) then
+        clearHealthPrediction(bar)
+        return
+    end
+    if bar.healAmount then
+        -- The number is optional when the client restricts its use in Lua.
+        if finite(raw) and raw > 0 then bar.healAmount:SetText("+" .. tostring(math.floor(raw + 0.5)))
+        else bar.healAmount:SetText("") end
+    end
+end
+
 local function updateHealth(bar, unit)
     local present = call(UnitExists, unit)
     if not readable(present) or present ~= true then
+        clearHealthPrediction(bar)
         bar:SetStatusBarColor(0.55, 0.55, 0.55, 1)
         bar:SetMinMaxValues(0, 1); bar:SetValue(0)
         if unit == "target" and readable(present) then
@@ -687,6 +1079,7 @@ local function updateHealth(bar, unit)
     local ok = pcall(function() bar:SetMinMaxValues(0, maximum); bar:SetValue(current) end)
     if not ok then bar:SetMinMaxValues(0, 1); bar:SetValue(0) end
     healthPercentText(bar.text, unit, current, maximum)
+    updateHealthPrediction(bar, unit)
 end
 
 -- Use the client's resource palette, not addon-defined per-resource colors.
@@ -775,8 +1168,34 @@ local function refreshSlotIcon(slot, id)
     end
 end
 
+-- Only track readable, independent spell cooldowns. Secret values cannot be
+-- safely compared in Lua, so they do not produce a guessed ready flash.
+local function trackReadyFlash(slot, id)
+    if not slot or not slot.readyFlash then return end
+    if slot.readySpell ~= id then
+        slot.readySpell, slot.readyAt = id, nil
+        slot.readyFlash:Stop()
+    end
+    if not id or type(GetTime) ~= "function" then return end
+    local now = call(GetTime)
+    if not finite(now) then return end
+    local cd = call(C_Spell and C_Spell.GetSpellCooldown, id)
+    if not readable(cd) or type(cd) ~= "table"
+        or (type(canaccesstable) == "function" and call(canaccesstable, cd) ~= true) then return end
+    local ok, start, duration, gcd = pcall(function() return cd.startTime, cd.duration, cd.isOnGCD end)
+    if not ok or not finite(start) or not finite(duration) or not readable(gcd) then return end
+    if start > 0 and duration > 1.6 and gcd ~= true and start + duration > now then
+        slot.readyAt = start + duration
+    elseif slot.readyAt then
+        local finished = now >= slot.readyAt and now <= slot.readyAt + 1
+        slot.readyAt = nil
+        if finished and slot.button:IsShown() then slot.readyFlash:Play() end
+    end
+end
+
 local function refreshCooldown(slot, id)
     if not slot or not slot.cooldown then return end
+    trackReadyFlash(slot, id)
     if not id then pcall(slot.cooldown.Clear, slot.cooldown); return end
     local stanceIndex = stanceForSpell(id)
     if stanceIndex and type(GetShapeshiftFormCooldown) == "function" then
@@ -805,6 +1224,9 @@ end
 local function refreshCooldowns()
     if not hud or not character then return end
     for i, slot in ipairs(hud.slots) do refreshCooldown(slot, character.slots[i]) end
+    for _, flyout in ipairs(hud.totemFlyouts or {}) do
+        for _, button in ipairs(flyout.buttons) do refreshCooldown(button, button.spellID) end
+    end
 end
 
 -- The client distinguishes unavailable skills from insufficient power.  A
@@ -846,6 +1268,9 @@ local function refreshUsabilityAll()
     for i, slot in ipairs(hud.slots) do
         refreshSlotIcon(slot, character.slots[i])
         refreshUsability(slot, character.slots[i])
+    end
+    for _, flyout in ipairs(hud.totemFlyouts or {}) do
+        for _, button in ipairs(flyout.buttons) do refreshUsability(button, button.spellID) end
     end
 end
 
@@ -1038,14 +1463,27 @@ local function createHUD()
     local _, playerClass = call(UnitClass, "player")
     local isShaman = readable(playerClass) and playerClass == "SHAMAN"
     if isShaman and type(frame.SetClampRectInsets) == "function" then
-        -- Include the outward bars and upper/lower totem layout when dragging.
-        pcall(frame.SetClampRectInsets, frame, -15, 15, 7, -32)
+        -- Include the warning above the orb and the lower totem layout.
+        pcall(frame.SetClampRectInsets, frame, -15, 15, 50, -32)
     end
     -- Keep the totem satellites clear of both bars and their aligned skills.
     frame.player = healthBar(frame, "player", isShaman and -15 or 15)
     frame.target = healthBar(frame, "target", isShaman and 449 or 419)
     frame.primary = resource(frame, 305)
     frame.totems = createTotemMonitor(frame.primary)
+    if isShaman then
+        local ready, flyouts = pcall(createTotemFlyouts, frame.primary)
+        if ready then frame.totemFlyouts = flyouts end
+        local warning = font(frame, "GameFontNormal")
+        warning:SetSize(220, 18)
+        warning:SetPoint("BOTTOM", frame, "TOP", 0, 30)
+        warning:SetTextColor(1, 0.72, 0.26, 1)
+        warning:SetShadowColor(0, 0, 0, 1)
+        warning:SetShadowOffset(1, -1)
+        warning:SetText("")
+        frame.imbueWarning = warning
+        safeRefreshTotemFlyouts(frame)
+    end
     frame.slots = {}
     for i = 1, SLOT_COUNT do
         local tile = CreateFrame("Button", nil, frame, "SecureActionButtonTemplate")
@@ -1084,6 +1522,25 @@ local function createHUD()
         cooldown:SetDrawEdge(false)
         cooldown:SetHideCountdownNumbers(false)
         cooldown:EnableMouse(false)
+        local readyFlash
+        pcall(function()
+            local flash = tile:CreateTexture(nil, "OVERLAY", nil, 7)
+            flash:Hide()
+            flash:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
+            flash:SetBlendMode("ADD")
+            flash:SetVertexColor(1, 0.82, 0.34, 0.9)
+            flash:SetSize((size or 52) * 1.3, (size or 52) * 1.3)
+            flash:SetPoint("CENTER", tile, "CENTER")
+            local group = flash:CreateAnimationGroup()
+            local scale = group:CreateAnimation("Scale")
+            scale:SetScaleFrom(0.7, 0.7); scale:SetScaleTo(1.4, 1.4); scale:SetDuration(0.36)
+            local alpha = group:CreateAnimation("Alpha")
+            alpha:SetFromAlpha(0.95); alpha:SetToAlpha(0); alpha:SetDuration(0.36)
+            group:SetScript("OnPlay", function() flash:Show() end)
+            group:SetScript("OnFinished", function() flash:Hide() end)
+            group:SetScript("OnStop", function() flash:Hide() end)
+            readyFlash = group
+        end)
         local index = i
         tile:SetScript("OnEnter", function(self)
             if not character or not character.slots[index] or not GameTooltip then return end
@@ -1092,7 +1549,7 @@ local function createHUD()
             GameTooltip:Show()
         end)
         tile:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
-        frame.slots[i] = {button=tile, icon=icon, cooldown=cooldown, hotkey=hotkey, keyPressed=keyPressed}
+        frame.slots[i] = {button=tile, icon=icon, cooldown=cooldown, hotkey=hotkey, keyPressed=keyPressed, readyFlash=readyFlash}
     end
     frame.handle = CreateFrame("Frame", nil, frame)
     frame.handle:SetSize(170, 22)
@@ -1124,17 +1581,27 @@ local function createHUD()
         end
         if frame.tftTargetCast then
             frame.tftTargetCast:ClearAllPoints()
-            frame.tftTargetCast:SetPoint("TOPLEFT", frame, "TOPLEFT", 449, -116)
+            frame.tftTargetCast:SetPoint("TOPLEFT", frame, "TOPLEFT", 449, -136)
         end
     end
     if type(toolbox.attachHUDTargetState) == "function" then
         local ok, ready = pcall(toolbox.attachHUDTargetState, frame)
         targetOK = ok and ready == true
     end
+    if type(toolbox.attachTargetOfTarget) == "function" then
+        pcall(toolbox.attachTargetOfTarget, frame)
+    end
     if type(toolbox.attachHUDCombo) == "function" then
         pcall(toolbox.attachHUDCombo, frame)
     end
+    if type(toolbox.attachWarriorStance) == "function" then
+        pcall(toolbox.attachWarriorStance, frame)
+    end
+    if type(toolbox.attachShamanBuffMonitor) == "function" then
+        pcall(toolbox.attachShamanBuffMonitor, frame)
+    end
     updateTotems(frame)
+    updateImbueWarning(frame)
     frame.tftReplacementReady = castOK and targetOK and not frame.tftTargetCastUnavailable
     return frame
 end
@@ -1150,6 +1617,22 @@ local function ensureHUD()
     hudKeyMapDirty = true
     installHUDKeyHooks()
     refreshVitals(); refreshCooldowns(); refreshUsabilityAll()
+    return true
+end
+
+function toolbox.getTotemPlaceholderStyle()
+    local config, err = currentData()
+    if not config then return nil, err end
+    return config.totemPlaceholderStyle == "icon" and "icon" or "text"
+end
+
+function toolbox.setTotemPlaceholderStyle(value)
+    if value ~= "text" and value ~= "icon" then return false, "设置无效" end
+    local config, err = currentData()
+    if not config then return false, err end
+    config.totemPlaceholderStyle = value
+    updateTotems(hud)
+    notify()
     return true
 end
 
@@ -1187,7 +1670,8 @@ function toolbox.setHUDEnabled(value)
     config.enabled = value
     if value then updateNativeFrames(hud:IsShown()) else updateNativeFrames(false) end
     if type(toolbox.syncPartyFrames) == "function" then pcall(toolbox.syncPartyFrames) end
-    updateTotems(hud); refreshVitals(); refreshCooldowns(); refreshUsabilityAll(); notify()
+    if type(toolbox.syncFocusFrame) == "function" then pcall(toolbox.syncFocusFrame) end
+    updateTotems(hud); updateImbueWarning(hud); refreshVitals(); refreshCooldowns(); refreshUsabilityAll(); notify()
     return true
 end
 
@@ -1211,8 +1695,15 @@ for _, event in ipairs({"PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "PLAYER_REGEN_E
     "SPELL_UPDATE_COOLDOWN", "SPELLS_CHANGED", "UPDATE_SHAPESHIFT_FORMS", "UPDATE_SHAPESHIFT_FORM", "CVAR_UPDATE",
     "UPDATE_BINDINGS", "ACTIONBAR_SLOT_CHANGED", "ACTIONBAR_PAGE_CHANGED", "UPDATE_BONUS_ACTIONBAR"}) do driver:RegisterEvent(event) end
 pcall(driver.RegisterEvent, driver, "PLAYER_TOTEM_UPDATE")
+pcall(driver.RegisterEvent, driver, "UPDATE_MULTI_CAST_ACTIONBAR")
+pcall(driver.RegisterEvent, driver, "UNIT_SPELLCAST_SUCCEEDED")
+for _, event in ipairs({"UNIT_HEAL_PREDICTION", "UNIT_HEAL_ABSORB_AMOUNT_CHANGED"}) do
+    pcall(driver.RegisterEvent, driver, event)
+end
+for _, event in ipairs({"PLAYER_EQUIPMENT_CHANGED", "UNIT_INVENTORY_CHANGED", "WEAPON_ENCHANT_CHANGED",
+    "WEAPON_SLOT_CHANGED", "GET_ITEM_INFO_RECEIVED"}) do pcall(driver.RegisterEvent, driver, event) end
 
-driver:SetScript("OnEvent", function(_, event, unit)
+driver:SetScript("OnEvent", function(_, event, unit, _, spellID)
     if event == "PLAYER_LOGIN" then
         initData()
         if character and character.enabled then
@@ -1226,7 +1717,8 @@ driver:SetScript("OnEvent", function(_, event, unit)
         if nativeSyncPending or (character and character.enabled and hud and hud:IsShown()) then
             updateNativeFrames(character and character.enabled and hud and hud:IsShown())
         end
-        updateTotems(hud); refreshVitals(); refreshCooldowns(); refreshUsabilityAll(); notify()
+        safeRefreshTotemFlyouts(hud)
+        updateTotems(hud); updateImbueWarning(hud); refreshVitals(); refreshCooldowns(); refreshUsabilityAll(); notify()
     elseif event == "PLAYER_REGEN_DISABLED" then
         if dragging then
             if not combat() then pcall(finishDrag, hud) else pendingDragStop = true end
@@ -1238,15 +1730,43 @@ driver:SetScript("OnEvent", function(_, event, unit)
     elseif event == "SPELL_UPDATE_COOLDOWN" or event == "SPELLS_CHANGED" or event == "UPDATE_SHAPESHIFT_FORMS" or event == "UPDATE_SHAPESHIFT_FORM" then
         if event ~= "SPELL_UPDATE_COOLDOWN" then clearHUDKeys(); hudKeyMapDirty = true end
         if event == "UPDATE_SHAPESHIFT_FORM" then updateTotems(hud) end
+        if event == "SPELLS_CHANGED" then updateImbueWarning(hud); safeRefreshTotemFlyouts(hud) end
+        refreshCooldowns(); refreshUsabilityAll()
+    elseif event == "UPDATE_MULTI_CAST_ACTIONBAR" then
+        safeRefreshTotemFlyouts(hud)
         refreshCooldowns(); refreshUsabilityAll()
     elseif event == "PLAYER_TOTEM_UPDATE" then
-        updateTotems(hud)
+        scheduleTotemRefresh(hud)
+        -- The native frame can load after the HUD. Recheck only if no other
+        -- owner has taken over; combat changes are deferred by the helper.
+        local frame = _G.TotemFrame
+        if frame and not nativeOwned[frame] and not nativeDisowned[frame]
+            and character and character.enabled and hud and hud:IsShown() then
+            updateNativeFrames(true)
+        end
+    elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
+        if readable(unit) and unit == "player" and isKnownTotemSpell(hud, spellID) then
+            scheduleTotemRefresh(hud)
+        end
+    elseif event == "PLAYER_EQUIPMENT_CHANGED" or event == "WEAPON_ENCHANT_CHANGED"
+        or event == "WEAPON_SLOT_CHANGED" or event == "GET_ITEM_INFO_RECEIVED" then
+        updateImbueWarning(hud)
+    elseif event == "UNIT_INVENTORY_CHANGED" then
+        if readable(unit) and unit == "player" then updateImbueWarning(hud) end
     elseif event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_TARGET_CHANGED" or event == "ADDON_LOADED" then
         if event ~= "PLAYER_TARGET_CHANGED" then clearHUDKeys(); hudKeyMapDirty = true; installHUDKeyHooks() end
+        if event ~= "PLAYER_TARGET_CHANGED" then safeRefreshTotemFlyouts(hud) end
         local previousNotice = nativeFrameNotice
         if character and character.enabled and hud and hud:IsShown() then updateNativeFrames(true) end
         if previousNotice ~= nativeFrameNotice then notify() end
-        updateTotems(hud); refreshVitals(); refreshUsabilityAll()
+        updateTotems(hud); updateImbueWarning(hud); refreshVitals(); refreshUsabilityAll()
+    elseif event == "UNIT_HEAL_PREDICTION" or event == "UNIT_HEAL_ABSORB_AMOUNT_CHANGED" then
+        if readable(unit) and type(unit) == "string" then
+            local samePlayer = call(UnitIsUnit, unit, "player")
+            local sameTarget = call(UnitIsUnit, unit, "target")
+            if unit == "player" or unit == "target" or (readable(samePlayer) and samePlayer == true)
+                or (readable(sameTarget) and sameTarget == true) then refreshVitals() end
+        end
     elseif event:match("^UNIT_") then
         if readable(unit) and (unit == "player" or unit == "target") then refreshVitals() end
     else
@@ -1256,13 +1776,15 @@ end)
 
 -- Skills configured here are not action slots.  Poll their client-provided
 -- state lightly so range and stance changes update even without slot events.
-local usabilityElapsed = 0
+local usabilityElapsed, imbueElapsed = 0, 0
 driver:SetScript("OnUpdate", function(_, elapsed)
     if not hud then return end
     if not hud:IsShown() then
+        totemRetry = nil
         if next(heldHUDKeys) then clearHUDKeys() end
         return
     end
+    advanceTotemRefresh(hud, elapsed)
     if next(heldHUDKeys) then
         local changed = false
         for token, held in pairs(heldHUDKeys) do
@@ -1271,10 +1793,17 @@ driver:SetScript("OnUpdate", function(_, elapsed)
         end
         if changed then repaintHUDKeys() end
     end
+    if hud.imbueWarning then
+        imbueElapsed = imbueElapsed + elapsed
+        if imbueElapsed >= 1 then imbueElapsed = 0; updateImbueWarning(hud) end
+    end
     usabilityElapsed = usabilityElapsed + elapsed
     if usabilityElapsed < 0.25 then return end
     usabilityElapsed = 0
     if hudKeyMapDirty then refreshHUDKeys() end
     updateTotemTimers(hud)
+    if character then
+        for i, slot in ipairs(hud.slots) do trackReadyFlash(slot, character.slots[i]) end
+    end
     refreshUsabilityAll()
 end)

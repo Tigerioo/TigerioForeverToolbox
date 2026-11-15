@@ -21,6 +21,7 @@ local pages = {
     {key = "globalui", name = "全局界面", icon = "Interface\\Icons\\INV_Misc_Spyglass_03", method = "toggleGlobalUI", frame = "TigerioForeverToolboxGlobalUI"},
     {key = "hud", name = "战斗 HUD", icon = "Interface\\Icons\\Ability_Warrior_BattleShout", method = "toggleHUDSettings", frame = "TigerioForeverToolboxHUDSettings"},
     {key = "calendar", name = "升级日历", icon = "Interface\\Icons\\INV_Misc_PocketWatch_01", method = "toggleCalendar", frame = "TigerioForeverToolboxFrame"},
+    {key = "profession", name = "专业进度", icon = "Interface\\Icons\\Trade_Mining", method = "toggleProfessionProgress", frame = "TigerioForeverToolboxProfessionProgress"},
     {key = "dungeon", name = "副本任务", icon = "Interface\\Icons\\INV_Misc_Map_01", method = "toggleDungeonGuide", frame = "TigerioForeverToolboxDungeonGuide"},
     {key = "weapon", name = "武器大师", icon = "Interface\\Icons\\INV_Sword_04", method = "toggleWeaponMasters", frame = "TigerioForeverToolboxWeaponMasters"},
     {key = "luck", name = "奇珍图鉴", icon = "Interface\\Icons\\INV_Misc_Gem_Pearl_05", method = "toggleLuckCollection", frame = "TigerioForeverToolboxLuckFrame"},

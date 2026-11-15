@@ -6,7 +6,7 @@ local ICON = "Interface\\AddOns\\TigerioForeverToolbox\\Media\\ToolboxIcon.tga"
 local pages = {"TigerioForeverToolboxFrame", "TigerioForeverToolboxDungeonGuide",
     "TigerioForeverToolboxWeaponMasters", "TigerioForeverToolboxLuckFrame",
     "TigerioForeverToolboxCompanionsFrame", "TigerioForeverToolboxHUDSettings",
-    "TigerioForeverToolboxGlobalUI", "TigerioForeverToolboxChangelog"}
+    "TigerioForeverToolboxGlobalUI", "TigerioForeverToolboxChangelog", "TigerioForeverToolboxProfessionProgress"}
 
 local function readable(value)
     if type(issecretvalue) ~= "function" then return true end

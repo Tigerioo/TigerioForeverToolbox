@@ -1,5 +1,5 @@
 local _, toolbox = ...
-local window, selected, message
+local window, selected, message, dragSource
 
 local function readable(value)
     if type(issecretvalue) ~= "function" then return true end
@@ -133,13 +133,31 @@ local function textureFor(id)
 end
 
 local render
+local function cursorSpell()
+    if type(GetCursorInfo) ~= "function" then return nil, nil, false end
+    local ok, kind, _, _, id = pcall(GetCursorInfo)
+    if not ok or not readable(kind) or not readable(id) then return nil, nil, false end
+    return kind, id, true
+end
+
+-- Pickup is restricted by the client. Never clear the slot unless the cursor
+-- confirms that exactly the same spell (including its rank) was picked up.
+local function pickupSpell(id)
+    local kind, _, known = cursorSpell()
+    if not known or kind ~= nil then return false end
+    local pickup = C_Spell and C_Spell.PickupSpell or PickupSpell
+    if type(pickup) ~= "function" or not pcall(pickup, id) then return false end
+    local actualKind, actualID, checked = cursorSpell()
+    return checked and actualKind == "spell" and actualID == id
+end
+
 local function choose(id)
     if not selected then return end
     -- Recheck against the current book before writing, including after spell changes.
     local book, found = spellBook(), false
     if book then for _, entry in ipairs(book) do if entry.id == id then found = true; break end end end
     if not found then message = "技能不可用"; render(); return end
-    if perform(toolbox.setHUDSlot, selected, id) then selected = nil end
+    perform(toolbox.setHUDSlot, selected, id)
     render()
 end
 
@@ -149,44 +167,91 @@ local function addSlot(f, index, x, y, size, displayNumber)
     button:SetSize(size, size)
     button:SetPoint("TOPLEFT", x, -y)
     button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    button:RegisterForDrag("LeftButton")
     local bg = button:CreateTexture(nil, "BACKGROUND")
     bg:SetAllPoints()
     bg:SetColorTexture(0.11, 0.085, 0.06, 1)
     local icon = button:CreateTexture(nil, "ARTWORK")
     icon:SetPoint("TOPLEFT", 3, -3)
     icon:SetPoint("BOTTOMRIGHT", -3, 3)
+    if type(icon.SetTexCoord) == "function" then icon:SetTexCoord(0.08, 0.92, 0.08, 0.92) end
     button.icon = icon
+    local border = button:CreateTexture(nil, "OVERLAY")
+    border:SetAllPoints()
+    border:SetTexture("Interface\\AddOns\\TigerioForeverToolbox\\Media\\HUD\\SlotFrame.tga")
+    button.border = border
     local highlight = button:CreateTexture(nil, "HIGHLIGHT")
     highlight:SetAllPoints()
     highlight:SetColorTexture(0.84, 0.62, 0.20, 0.25)
-    local mark = button:CreateTexture(nil, "OVERLAY")
-    mark:SetPoint("BOTTOMLEFT", 0, 0)
-    mark:SetPoint("BOTTOMRIGHT", 0, 0)
-    mark:SetHeight(2)
-    mark:SetColorTexture(0.9, 0.7, 0.25, 1)
-    button.marker = mark
     button.displayNumber = displayNumber or index
-    button.number = label(button, "GameFontNormalSmall", 4, 3, tostring(button.displayNumber))
+    button.empty = label(button, "GameFontNormalLarge", (size - 9) / 2, (size - 16) / 2, "+")
     button.unavailable = label(button, "GameFontHighlight", (size - 9) / 2, (size - 16) / 2, "?")
     button:SetScript("OnClick", function(_, mouse)
         if inCombat() then message = "战斗中无法配置"; render(); return end
         if mouse == "RightButton" then
-            if perform(toolbox.setHUDSlot, index, nil) then selected = nil end
+            local kind, _, known = cursorSpell()
+            if not known or kind ~= nil then return end
+            if perform(toolbox.setHUDSlot, index, nil) then selected = index end
         else
             selected, message = index, nil
             if window.listScroll then window.listScroll:SetVerticalScroll(0) end
         end
         render()
     end)
+    button:SetScript("OnDragStart", function()
+        if inCombat() then message = "战斗中无法配置"; render(); return end
+        local data = config()
+        local slots = data and field(data, "slots")
+        local id = tableOK(slots) and field(slots, index)
+        if type(id) ~= "number" then return end
+        if pickupSpell(id) then
+            if perform(toolbox.setHUDSlot, index, nil) then
+                dragSource = {index = index, id = id}
+                selected = index
+            end
+        else
+            message = "无法拾取技能"
+        end
+        render()
+    end)
     button:SetScript("OnReceiveDrag", function()
         if inCombat() then message = "战斗中无法配置"; render(); return end
         if type(GetCursorInfo) ~= "function" then return end
-        local ok, kind, _, _, spellID = pcall(GetCursorInfo)
-        if not ok or not readable(kind) or not readable(spellID) or kind ~= "spell" or type(spellID) ~= "number" then return end
+        local kind, spellID, known = cursorSpell()
+        if not known or kind ~= "spell" or type(spellID) ~= "number" then return end
         local book, found = spellBook(), false
         if book then for _, entry in ipairs(book) do if entry.id == spellID then found = true; break end end end
         if not found then message = "技能不可用"; render(); return end
-        if perform(toolbox.setHUDSlot, index, spellID) and type(ClearCursor) == "function" then ClearCursor() end
+        local data = config()
+        local slots = data and field(data, "slots")
+        if not tableOK(slots) then message = "技能设置不可用"; render(); return end
+        local old = field(slots, index)
+        local source = dragSource and dragSource.id == spellID and dragSource or nil
+        if source and source.index ~= index and field(slots, source.index) ~= nil then source = nil end
+        if not perform(toolbox.setHUDSlot, index, spellID) then render(); return end
+        if source and source.index ~= index and old ~= nil then
+            if not perform(toolbox.setHUDSlot, source.index, old) then
+                perform(toolbox.setHUDSlot, index, old)
+                message = "技能交换失败"
+                render(); return
+            end
+        end
+        if type(ClearCursor) == "function" then
+            local currentKind, currentID, checked = cursorSpell()
+            if checked and currentKind == "spell" and currentID == spellID then
+                ClearCursor()
+                if not source and type(old) == "number" and old ~= spellID then
+                    if not pickupSpell(old) then
+                        -- Restore the old slot and incoming cursor on failure when possible.
+                        perform(toolbox.setHUDSlot, index, old)
+                        pickupSpell(spellID)
+                        message = "技能交换失败"
+                    end
+                end
+            end
+            dragSource = nil
+            selected = index
+        end
         render()
     end)
     return button
@@ -194,7 +259,7 @@ end
 
 local function updateSpells()
     if not window then return end
-    local book = selected and spellBook() or nil
+    local book = spellBook()
     local search = window.search:GetText() or ""
     if not readable(search) or type(search) ~= "string" then search = "" end
     search = search:lower():match("^%s*(.-)%s*$")
@@ -213,6 +278,11 @@ local function updateSpells()
                 row.spellLabel = label(row, "GameFontHighlightSmall", 31, 6, "")
                 row.spellLabel:SetWidth(255)
                 row:SetScript("OnClick", function(self) choose(self.spellID) end)
+                row:RegisterForDrag("LeftButton")
+                row:SetScript("OnDragStart", function(self)
+                    if inCombat() then message = "战斗中无法配置"; render(); return end
+                    if not pickupSpell(self.spellID) then message = "无法拾取技能"; render() end
+                end)
                 window.spellRows[count] = row
             end
             row.spellID = entry.id
@@ -226,12 +296,11 @@ local function updateSpells()
     end
     for i = count + 1, #window.spellRows do window.spellRows[i]:Hide() end
     window.listContent:SetHeight(math.max(1, count * 30))
-    if not selected then window.listMessage:SetText("选择技能槽")
-    elseif not book then window.listMessage:SetText("技能列表不可用")
+    if not book then window.listMessage:SetText("技能列表不可用")
     elseif count == 0 then window.listMessage:SetText("未找到技能")
     else window.listMessage:SetText("") end
     local selectedSlot = selected and window.slots[selected]
-    window.listTitle:SetText(selectedSlot and ("选择技能 · " .. selectedSlot.displayNumber) or "技能")
+    window.listTitle:SetText(selectedSlot and ("技能 · 已选位置 " .. selectedSlot.displayNumber) or "技能")
 end
 
 render = function()
@@ -243,14 +312,29 @@ render = function()
         local id = field(slots, index)
         local texture = textureFor(id)
         if texture then button.icon:SetTexture(texture); button.icon:Show() else button.icon:Hide() end
+        if type(id) ~= "number" then button.empty:Show() else button.empty:Hide() end
         if type(id) == "number" and not texture then button.unavailable:Show() else button.unavailable:Hide() end
-        if selected == index then button.marker:Show() else button.marker:Hide() end
+        if selected == index then button.border:SetVertexColor(1, 0.82, 0.25, 1)
+        else button.border:SetVertexColor(0.63, 0.55, 0.42, 1) end
     end
     local enabled = data and field(data, "enabled") == true
     local unlocked = data and field(data, "unlocked") == true
     local notice = data and field(data, "nativeFrameNotice")
     window.enable.caption:SetText(enabled and "关闭 HUD" or "启用 HUD")
     window.lock.caption:SetText(unlocked and "锁定位置" or "移动位置")
+    local totemStyle = call(toolbox.getTotemPlaceholderStyle) or "text"
+    for style, button in pairs(window.totemStyleButtons) do
+        if style == totemStyle then
+            button.caption:SetTextColor(1, 0.82, 0)
+        else
+            button.caption:SetTextColor(0.8, 0.8, 0.8)
+        end
+        if inCombat() or type(toolbox.setTotemPlaceholderStyle) ~= "function" then
+            button:Disable()
+        else
+            button:Enable()
+        end
+    end
     window.status:SetText(message or (not data and reason or (inCombat() and "战斗中无法配置" or (notice and safeText(notice) or ""))))
     local bars, barsError = actionBarOptions()
     local locked = inCombat()
@@ -271,10 +355,11 @@ local function createWindow()
     toolbox.nativeDivider(f, 22, 76, 755)
     toolbox.nativeSection(f, 18, 87, 374, 417)
     toolbox.nativeSection(f, 402, 87, 380, 417)
-    f.status = label(f, "GameFontHighlightSmall", 30, 108, "")
+    label(f, "GameFontNormal", 30, 102, "技能布局")
+    f.status = label(f, "GameFontHighlightSmall", 30, 478, "")
     f.status:SetWidth(350)
     f.enable = quietButton(f, 100, 24)
-    f.enable:SetPoint("TOPLEFT", 30, -138)
+    f.enable:SetPoint("TOPLEFT", 30, -123)
     f.enable.caption = f.enable:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     f.enable.caption:SetPoint("CENTER")
     f.enable:SetScript("OnClick", function()
@@ -282,28 +367,65 @@ local function createWindow()
         if data then perform(toolbox.setHUDEnabled, field(data, "enabled") ~= true); render() end
     end)
     f.lock = quietButton(f, 100, 24)
-    f.lock:SetPoint("TOPLEFT", 144, -138)
+    f.lock:SetPoint("TOPLEFT", 144, -123)
     f.lock.caption = f.lock:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     f.lock.caption:SetPoint("CENTER")
     f.lock:SetScript("OnClick", function()
         local data = config()
         if data then perform(toolbox.setHUDUnlocked, field(data, "unlocked") ~= true); render() end
     end)
-    label(f, "GameFontNormal", 30, 185, "左侧 · 攻击")
-    label(f, "GameFontNormal", 216, 185, "右侧 · 控制 / 保命")
-    label(f, "GameFontNormal", 30, 285, "下方")
+    label(f, "GameFontNormal", 30, 157, "左侧")
+    label(f, "GameFontNormal", 216, 157, "右侧")
+    label(f, "GameFontNormal", 30, 259, "下方")
     f.slots = {}
     -- Preserve existing slot IDs while keeping the displayed numbering in visual order.
     for i = 1, 5 do
         local index = i == 5 and 15 or i
-        f.slots[index] = addSlot(f, index, 30 + (i - 1) * 35, 209, 34, i)
+        f.slots[index] = addSlot(f, index, 30 + (i - 1) * 34, 178, 32, i)
     end
     for i = 1, 5 do
         local index = i == 5 and 16 or i + 4
-        f.slots[index] = addSlot(f, index, 216 + (i - 1) * 35, 209, 34, i + 5)
+        f.slots[index] = addSlot(f, index, 216 + (i - 1) * 34, 178, 32, i + 5)
     end
-    for i = 1, 6 do f.slots[i + 8] = addSlot(f, i + 8, 30 + (i - 1) * 48, 309, 43, i + 10) end
+    -- A small schematic mirrors the in-game HUD so the slot groups have context.
+    for _, x in ipairs({30, 216}) do
+        local bar = f:CreateTexture(nil, "BACKGROUND")
+        bar:SetPoint("TOPLEFT", f, "TOPLEFT", x, -217)
+        bar:SetSize(166, 13)
+        bar:SetTexture("Interface\\AddOns\\TigerioForeverToolbox\\Media\\HUD\\BarPanel.tga")
+    end
+    local orb = f:CreateTexture(nil, "ARTWORK")
+    orb:SetSize(18, 18); orb:SetPoint("TOPLEFT", f, "TOPLEFT", 195, -215)
+    orb:SetTexture("Interface\\AddOns\\TigerioForeverToolbox\\Media\\HUD\\OrbFill.tga")
+    for i = 1, 6 do f.slots[i + 8] = addSlot(f, i + 8, 30 + (i - 1) * 43, 278, 39, i + 10) end
 
+    label(f, "GameFontNormal", 30, 334, "图腾占位")
+    f.totemStyleButtons = {}
+    local function totemStyleButton(style, title, x)
+        local button = quietButton(f, 58, 24)
+        button:SetPoint("TOPLEFT", x, -328)
+        button.caption = button:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        button.caption:SetPoint("CENTER")
+        button.caption:SetText(title)
+        button:SetScript("OnClick", function()
+            perform(toolbox.setTotemPlaceholderStyle, style)
+            render()
+        end)
+        f.totemStyleButtons[style] = button
+    end
+    totemStyleButton("text", "文字", 130)
+    totemStyleButton("icon", "图标", 196)
+    local _, playerClass = UnitClass("player")
+    if playerClass == "SHAMAN" then
+        local buffButton = quietButton(f, 100, 24)
+        buffButton:SetPoint("TOPLEFT", 264, -328)
+        buffButton.caption = buffButton:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        buffButton.caption:SetPoint("CENTER")
+        buffButton.caption:SetText("增益监控")
+        buffButton:SetScript("OnClick", function()
+            if type(toolbox.openShamanBuffConfig) == "function" then toolbox.openShamanBuffConfig() end
+        end)
+    end
     toolbox.nativeDivider(f, 30, 372, 344)
     label(f, "GameFontNormal", 30, 381, "系统动作条")
     f.actionBarChecks = {}
@@ -327,6 +449,7 @@ local function createWindow()
     f.actionBarStatus:SetWidth(340)
 
     f.listTitle = label(f, "GameFontNormal", 414, 100, "技能")
+    label(f, "GameFontHighlightSmall", 534, 103, "点击选择  ·  拖入 / 拖出  ·  右键清空")
     local search = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
     search:SetSize(315, 24)
     search:SetPoint("TOPLEFT", 416, -128)
@@ -352,6 +475,7 @@ end
 function toolbox.toggleHUDSettings()
     if not window then window = createWindow() end
     if window:IsShown() then window:Hide(); return end
+    selected = selected or 1
     window:Show()
     render()
 end
@@ -365,11 +489,15 @@ function toolbox.onActionBarOptionsChanged()
 end
 
 local events = CreateFrame("Frame")
-for _, event in ipairs({"SPELLS_CHANGED", "SPELL_TEXT_UPDATE", "PLAYER_REGEN_ENABLED", "PLAYER_REGEN_DISABLED"}) do
+for _, event in ipairs({"SPELLS_CHANGED", "SPELL_TEXT_UPDATE", "PLAYER_REGEN_ENABLED", "PLAYER_REGEN_DISABLED", "CURSOR_UPDATE"}) do
     events:RegisterEvent(event)
 end
 events:SetScript("OnEvent", function(_, event)
     if event == "PLAYER_REGEN_ENABLED" then message = nil end
+    if event == "CURSOR_UPDATE" and dragSource then
+        local kind, id, known = cursorSpell()
+        if not known or kind ~= "spell" or id ~= dragSource.id then dragSource = nil end
+    end
     render()
 end)
 

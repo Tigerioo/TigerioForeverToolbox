@@ -1,6 +1,9 @@
 -- Lightweight target details; all unit data remains client-provided.
 local _, toolbox = ...
 local MEDIA = "Interface\\AddOns\\TigerioForeverToolbox\\Media\\HUD\\"
+-- Match the party debuff icons and center them on the 48-pixel health panels.
+local DEBUFF_SIZE, DEBUFF_SPACING, DEBUFF_COUNT = 32, 4, 4
+local DEBUFF_TOP_OFFSET = (DEBUFF_SIZE - 48) / 2
 
 local function readable(value)
     if type(issecretvalue) ~= "function" then return true end
@@ -25,6 +28,42 @@ end
 local function field(value, key)
     local ok, result = pcall(function() return value[key] end)
     if ok and readable(result) then return result end
+end
+
+local function finite(value)
+    return readable(value) and type(value) == "number" and value == value
+        and value > -math.huge and value < math.huge
+end
+
+local function createAuraCooldown(parent, relative)
+    local cooldown = CreateFrame("Cooldown", nil, parent, "CooldownFrameTemplate")
+    cooldown:SetAllPoints(relative)
+    if type(cooldown.SetDrawEdge) == "function" then cooldown:SetDrawEdge(false) end
+    if type(cooldown.SetDrawSwipe) == "function" then cooldown:SetDrawSwipe(false) end
+    if type(cooldown.SetHideCountdownNumbers) == "function" then cooldown:SetHideCountdownNumbers(false) end
+    cooldown:EnableMouse(false)
+    return cooldown
+end
+
+local function clearAuraCooldown(cooldown)
+    if type(cooldown.Clear) == "function" then pcall(cooldown.Clear, cooldown)
+    elseif type(cooldown.SetCooldown) == "function" then pcall(cooldown.SetCooldown, cooldown, 0, 0) end
+end
+
+local function updateAuraCooldown(cooldown, unit, aura)
+    clearAuraCooldown(cooldown)
+    local id = field(aura, "auraInstanceID")
+    if finite(id) and C_UnitAuras and type(C_UnitAuras.GetAuraDuration) == "function"
+        and type(cooldown.SetCooldownFromDurationObject) == "function" then
+        local ok, duration = pcall(C_UnitAuras.GetAuraDuration, unit, id)
+        if ok and (not readable(duration) or duration ~= nil)
+            and pcall(cooldown.SetCooldownFromDurationObject, cooldown, duration) then return end
+    end
+    local duration, expires = field(aura, "duration"), field(aura, "expirationTime")
+    if finite(duration) and duration > 0 and finite(expires) and expires > 0
+        and type(cooldown.SetCooldown) == "function" then
+        pcall(cooldown.SetCooldown, cooldown, expires - duration, duration)
+    end
 end
 
 function toolbox.attachHUDTargetState(hud)
@@ -58,15 +97,16 @@ function toolbox.attachHUDTargetState(hud)
     if type(text.SetMaxLines) == "function" then text:SetMaxLines(1) end
     text:SetText("")
     state.text = text
+    local targetPanel = hud.target:GetParent()
+    if not targetPanel then return false, "目标框不可用" end
     local icons = {}
     for i = 1, 4 do
-        -- The last two bottom skill slots stop at x=524; this row starts at x=540.
         local image = state:CreateTexture(nil, "ARTWORK")
         image:SetSize(14, 14)
-        image:SetPoint("TOPLEFT", hud, "TOPLEFT", 542 + (i - 1) * 20, -145)
+        image:SetPoint("TOPLEFT", targetPanel, "BOTTOMLEFT", 2 + (i - 1) * 20, -2)
         local border = state:CreateTexture(nil, "OVERLAY")
         border:SetSize(18, 18)
-        border:SetPoint("TOPLEFT", hud, "TOPLEFT", 540 + (i - 1) * 20, -143)
+        border:SetPoint("TOPLEFT", targetPanel, "BOTTOMLEFT", (i - 1) * 20, 0)
         border:SetTexture(MEDIA .. "SlotFrame.tga")
         image:Hide()
         border:Hide()
@@ -75,21 +115,23 @@ function toolbox.attachHUDTargetState(hud)
     state.icons = icons
     local debuffs = {player = {}, target = {}}
     for _, unit in ipairs({"player", "target"}) do
-        for i = 1, 4 do
+        for i = 1, DEBUFF_COUNT do
             local border = state:CreateTexture(nil, "OVERLAY")
-            border:SetSize(30, 30)
+            border:SetSize(DEBUFF_SIZE, DEBUFF_SIZE)
             local side = unit == "player" and "TOPRIGHT" or "TOPLEFT"
             local relative = unit == "player" and "TOPLEFT" or "TOPRIGHT"
-            local offset = 8 + (i - 1) * 34
-            border:SetPoint(side, hud[unit], relative, unit == "player" and -offset or offset, -5)
+            local offset = 8 + (i - 1) * (DEBUFF_SIZE + DEBUFF_SPACING)
+            border:SetPoint(side, hud[unit], relative, unit == "player" and -offset or offset, DEBUFF_TOP_OFFSET)
             border:SetTexture(MEDIA .. "SlotFrame.tga")
             local image = state:CreateTexture(nil, "ARTWORK")
             image:SetPoint("TOPLEFT", border, "TOPLEFT", 3, -3)
             image:SetPoint("BOTTOMRIGHT", border, "BOTTOMRIGHT", -3, 3)
             if type(image.SetTexCoord) == "function" then image:SetTexCoord(0.08, 0.92, 0.08, 0.92) end
+            local cooldown = createAuraCooldown(state, image)
             image:Hide()
             border:Hide()
-            debuffs[unit][i] = {image = image, border = border}
+            cooldown:Hide()
+            debuffs[unit][i] = {image = image, border = border, cooldown = cooldown}
         end
     end
     state.debuffs = debuffs
@@ -115,15 +157,15 @@ function toolbox.attachHUDTargetState(hud)
             local frame = CreateFrame("AuraContainer", nil, holder, "CustomAuraContainerTemplate")
             assert(type(frame.AddAuraGroup) == "function" and type(frame.SetUnit) == "function"
                 and type(frame.SetEnabled) == "function")
-            frame:SetPoint("TOPLEFT", hud.target, "TOPRIGHT", 8, -5)
+            frame:SetPoint("TOPLEFT", hud.target, "TOPRIGHT", 8, DEBUFF_TOP_OFFSET)
             frame:SetFlowLayoutAnchorPoint("TOPLEFT")
             frame:SetFlowLayoutGrowthDirection(1, -1)
-            frame:SetFlowLayoutMaximumLineSize(132)
+            frame:SetFlowLayoutMaximumLineSize(DEBUFF_COUNT * DEBUFF_SIZE + (DEBUFF_COUNT - 1) * DEBUFF_SPACING)
             frame:AddAuraGroup("debuffs", "HARMFUL", {
-                maxFrameCount = 4,
-                layout = {elementWidth = 30, elementHeight = 30, elementSpacing = 4},
+                maxFrameCount = DEBUFF_COUNT,
+                layout = {elementWidth = DEBUFF_SIZE, elementHeight = DEBUFF_SIZE, elementSpacing = DEBUFF_SPACING},
                 initializeFrame = function(button)
-                    button:SetSize(30, 30)
+                    button:SetSize(DEBUFF_SIZE, DEBUFF_SIZE)
                     button:EnableMouse(false)
                     local image = button:CreateTexture(nil, "ARTWORK")
                     image:SetPoint("TOPLEFT", button, "TOPLEFT", 3, -3)
@@ -133,6 +175,13 @@ function toolbox.attachHUDTargetState(hud)
                     border:SetAllPoints(button)
                     border:SetTexture(MEDIA .. "SlotFrame.tga")
                     button:SetIcon(image)
+                    if type(button.SetDurationCooldown) == "function" then
+                        -- A timer incompatibility must not disable the target aura container.
+                        pcall(function()
+                            local cooldown = createAuraCooldown(button, image)
+                            button:SetDurationCooldown(cooldown)
+                        end)
+                    end
                     initialized = true
                 end,
             })
@@ -143,12 +192,14 @@ function toolbox.attachHUDTargetState(hud)
         end)
         if ok then
             targetAuraContainer = container
-            for _, icon in ipairs(debuffs.target) do icon.image:Hide(); icon.border:Hide() end
+            for _, icon in ipairs(debuffs.target) do
+                icon.image:Hide(); icon.border:Hide(); clearAuraCooldown(icon.cooldown); icon.cooldown:Hide()
+            end
             holder:Show()
         end
     end
     local auraStatus = state:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    auraStatus:SetPoint("TOPLEFT", hud, "TOPLEFT", 540, -164)
+    auraStatus:SetPoint("LEFT", targetPanel, "BOTTOMLEFT", 80, -9)
     auraStatus:SetText("")
     state.auraStatus = auraStatus
 
@@ -159,7 +210,9 @@ function toolbox.attachHUDTargetState(hud)
 
     local function updateDebuffs(unit)
         local slots = debuffs[unit]
-        for _, icon in ipairs(slots) do icon.image:Hide(); icon.border:Hide() end
+        for _, icon in ipairs(slots) do
+            icon.image:Hide(); icon.border:Hide(); clearAuraCooldown(icon.cooldown); icon.cooldown:Hide()
+        end
         if unit == "target" and targetAuraContainer then return end
         local exists = call(UnitExists, unit)
         if not readable(exists) or exists ~= true or not auraEventsAvailable
@@ -172,6 +225,8 @@ function toolbox.attachHUDTargetState(hud)
                 slots[index].image:SetTexture(texture)
                 slots[index].image:Show()
                 slots[index].border:Show()
+                updateAuraCooldown(slots[index].cooldown, unit, aura)
+                slots[index].cooldown:Show()
             end
         end
     end
