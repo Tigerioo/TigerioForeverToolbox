@@ -4,6 +4,8 @@ local MEDIA = "Interface\\AddOns\\TigerioForeverToolbox\\Media\\HUD\\"
 -- Match the party debuff icons and center them on the 48-pixel health panels.
 local DEBUFF_SIZE, DEBUFF_SPACING, DEBUFF_COUNT = 32, 4, 4
 local DEBUFF_TOP_OFFSET = (DEBUFF_SIZE - 48) / 2
+-- The target cast bar starts 24 pixels below the health panel.
+local BUFF_SIZE, BUFF_SPACING, BUFF_COUNT = 24, 3, 4
 
 local function readable(value)
     if type(issecretvalue) ~= "function" then return true end
@@ -100,17 +102,31 @@ function toolbox.attachHUDTargetState(hud)
     local targetPanel = hud.target:GetParent()
     if not targetPanel then return false, "目标框不可用" end
     local icons = {}
-    for i = 1, 4 do
-        local image = state:CreateTexture(nil, "ARTWORK")
-        image:SetSize(14, 14)
-        image:SetPoint("TOPLEFT", targetPanel, "BOTTOMLEFT", 2 + (i - 1) * 20, -2)
-        local border = state:CreateTexture(nil, "OVERLAY")
-        border:SetSize(18, 18)
-        border:SetPoint("TOPLEFT", targetPanel, "BOTTOMLEFT", (i - 1) * 20, 0)
+    for i = 1, BUFF_COUNT do
+        local slot = CreateFrame("Frame", nil, state)
+        slot:SetSize(BUFF_SIZE, BUFF_SIZE)
+        slot:SetPoint("TOPLEFT", targetPanel, "BOTTOMLEFT", (i - 1) * (BUFF_SIZE + BUFF_SPACING), 0)
+        slot:EnableMouse(true)
+        if type(slot.SetMouseClickEnabled) == "function" then slot:SetMouseClickEnabled(false) end
+        local image = slot:CreateTexture(nil, "ARTWORK")
+        image:SetPoint("TOPLEFT", 2, -2)
+        image:SetPoint("BOTTOMRIGHT", -2, 2)
+        local border = slot:CreateTexture(nil, "OVERLAY")
+        border:SetAllPoints(slot)
         border:SetTexture(MEDIA .. "SlotFrame.tga")
-        image:Hide()
-        border:Hide()
-        icons[i] = {image = image, border = border}
+        slot:SetScript("OnEnter", function(self)
+            if not GameTooltip or not self.auraIndex then return end
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            local method = GameTooltip.SetUnitBuff or GameTooltip.SetUnitAura
+            if type(method) == "function" and pcall(method, GameTooltip, "target", self.auraIndex, "HELPFUL") then
+                GameTooltip:Show()
+            else GameTooltip:Hide() end
+        end)
+        slot:SetScript("OnLeave", function(self)
+            if GameTooltip and GameTooltip:IsOwned(self) then GameTooltip:Hide() end
+        end)
+        slot:Hide()
+        icons[i] = {frame = slot, image = image}
     end
     state.icons = icons
     local debuffs = {player = {}, target = {}}
@@ -135,7 +151,7 @@ function toolbox.attachHUDTargetState(hud)
         end
     end
     state.debuffs = debuffs
-    local targetAuraContainer
+    local targetAuraContainer, targetBuffContainer
     local targetAuraSetupAttempted = false
     local function setupTargetAuraContainer()
         if targetAuraSetupAttempted or targetAuraContainer then return end
@@ -197,14 +213,53 @@ function toolbox.attachHUDTargetState(hud)
             end
             holder:Show()
         end
+        local buffHolder = CreateFrame("Frame", nil, state)
+        buffHolder:SetAllPoints(state); buffHolder:Hide()
+        local buffInitialized = false
+        local buffOK, buffs = pcall(function()
+            local frame = CreateFrame("AuraContainer", nil, buffHolder, "CustomAuraContainerTemplate")
+            assert(type(frame.AddAuraGroup) == "function" and type(frame.SetUnit) == "function"
+                and type(frame.SetEnabled) == "function")
+            frame:SetPoint("TOPLEFT", targetPanel, "BOTTOMLEFT", 0, 0)
+            frame:SetFlowLayoutAnchorPoint("TOPLEFT")
+            frame:SetFlowLayoutGrowthDirection(1, -1)
+            frame:SetFlowLayoutMaximumLineSize(BUFF_COUNT * BUFF_SIZE + (BUFF_COUNT - 1) * BUFF_SPACING)
+            frame:AddAuraGroup("buffs", "HELPFUL", {
+                maxFrameCount = BUFF_COUNT,
+                layout = {elementWidth = BUFF_SIZE, elementHeight = BUFF_SIZE, elementSpacing = BUFF_SPACING},
+                initializeFrame = function(button)
+                    button:SetSize(BUFF_SIZE, BUFF_SIZE)
+                    button:EnableMouse(true)
+                    if type(button.SetMouseClickEnabled) == "function" then button:SetMouseClickEnabled(false) end
+                    if type(button.EnableMouseMotion) == "function" then button:EnableMouseMotion(true) end
+                    if type(button.SetHideTooltipInCombat) == "function" then button:SetHideTooltipInCombat(false) end
+                    local image = button:CreateTexture(nil, "ARTWORK")
+                    image:SetPoint("TOPLEFT", 2, -2); image:SetPoint("BOTTOMRIGHT", -2, 2)
+                    image:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+                    local border = button:CreateTexture(nil, "OVERLAY")
+                    border:SetAllPoints(button); border:SetTexture(MEDIA .. "SlotFrame.tga")
+                    button:SetIcon(image)
+                    buffInitialized = true
+                end,
+            })
+            assert(buffInitialized)
+            frame:SetUnit("target")
+            frame:SetEnabled(true)
+            return frame
+        end)
+        if buffOK and buffs then targetBuffContainer = buffs; buffHolder:Show() end
     end
     local auraStatus = state:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    auraStatus:SetPoint("LEFT", targetPanel, "BOTTOMLEFT", 80, -9)
+    auraStatus:SetPoint("LEFT", targetPanel, "BOTTOMLEFT", BUFF_COUNT * (BUFF_SIZE + BUFF_SPACING), -BUFF_SIZE / 2)
     auraStatus:SetText("")
     state.auraStatus = auraStatus
 
     local function clearAuras()
-        for _, icon in ipairs(icons) do icon.image:Hide(); icon.border:Hide() end
+        for _, icon in ipairs(icons) do
+            if GameTooltip and GameTooltip:IsOwned(icon.frame) then GameTooltip:Hide() end
+            icon.frame.auraIndex = nil
+            icon.frame:Hide()
+        end
         auraStatus:SetText("")
     end
 
@@ -233,13 +288,14 @@ function toolbox.attachHUDTargetState(hud)
 
     local function updateAuras()
         clearAuras()
+        if targetBuffContainer then return end
         if not auraEventsAvailable or not C_UnitAuras or type(C_UnitAuras.GetAuraDataByIndex) ~= "function" then
             auraStatus:SetText("状态未知")
             return
         end
         local count, limited = 0, false
         for _, filter in ipairs({"HELPFUL"}) do
-            for index = 1, 4 do
+            for index = 1, BUFF_COUNT do
                 local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, "target", index, filter)
                 if not ok or not readable(aura) then limited = true; break end
                 if aura == nil then break end
@@ -248,8 +304,8 @@ function toolbox.attachHUDTargetState(hud)
                 if (type(texture) == "number" and texture > 0) or (type(texture) == "string" and texture ~= "") then
                     count = count + 1
                     icons[count].image:SetTexture(texture)
-                    icons[count].image:Show()
-                    icons[count].border:Show()
+                    icons[count].frame.auraIndex = index
+                    icons[count].frame:Show()
                 else
                     limited = true
                 end
@@ -276,6 +332,9 @@ function toolbox.attachHUDTargetState(hud)
         -- container to rebuild rather than reading or hiding its restricted frames.
         if event == "PLAYER_TARGET_CHANGED" and targetAuraContainer then
             pcall(targetAuraContainer.UpdateAllAuras, targetAuraContainer)
+        end
+        if event == "PLAYER_TARGET_CHANGED" and targetBuffContainer then
+            pcall(targetBuffContainer.UpdateAllAuras, targetBuffContainer)
         end
         if event == "UNIT_AURA" and readable(unit) and unit == "player" then
             updateDebuffs("player")
