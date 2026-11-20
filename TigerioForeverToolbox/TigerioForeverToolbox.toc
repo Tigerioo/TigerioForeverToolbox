@@ -8,6 +8,8 @@
 
 NativeUI.lua
 Calendar.lua
+MapTime.lua
+MapTimeUI.lua
 Telemetry.lua
 MailRecipientsData.lua
 MailRecipientsUI.lua

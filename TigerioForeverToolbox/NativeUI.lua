@@ -21,6 +21,7 @@ local pages = {
     {key = "globalui", name = "全局界面", icon = "Interface\\Icons\\INV_Misc_Spyglass_03", method = "toggleGlobalUI", frame = "TigerioForeverToolboxGlobalUI"},
     {key = "hud", name = "战斗 HUD", icon = "Interface\\Icons\\Ability_Warrior_BattleShout", method = "toggleHUDSettings", frame = "TigerioForeverToolboxHUDSettings"},
     {key = "calendar", name = "升级日历", icon = "Interface\\Icons\\INV_Misc_PocketWatch_01", method = "toggleCalendar", frame = "TigerioForeverToolboxFrame"},
+    {key = "maptime", name = "地图时长", icon = "Interface\\Icons\\INV_Misc_Map_01", method = "toggleMapTime", frame = "TigerioForeverToolboxMapTime"},
     {key = "profession", name = "专业进度", icon = "Interface\\Icons\\Trade_Mining", method = "toggleProfessionProgress", frame = "TigerioForeverToolboxProfessionProgress"},
     {key = "dungeon", name = "副本任务", icon = "Interface\\Icons\\INV_Misc_Map_01", method = "toggleDungeonGuide", frame = "TigerioForeverToolboxDungeonGuide"},
     {key = "weapon", name = "武器大师", icon = "Interface\\Icons\\INV_Sword_04", method = "toggleWeaponMasters", frame = "TigerioForeverToolboxWeaponMasters"},
@@ -99,7 +100,8 @@ function toolbox.createNativeWindow(name, title, width, height, page)
         local key, method, frameName, label = entry.key, entry.method, entry.frame, entry.name
         local tab = CreateFrame("Button", nil, f)
         tab:SetSize(52, 52)
-        tab:SetPoint("TOPLEFT", f, "TOPRIGHT", -2, -36 - (index - 1) * 51)
+        local spacing = math.min(51, (WINDOW_HEIGHT - 36 - 52) / math.max(1, #pages - 1))
+        tab:SetPoint("TOPLEFT", f, "TOPRIGHT", -2, -36 - (index - 1) * spacing)
         local background = tab:CreateTexture(nil, "BACKGROUND")
         background:SetAtlas("common-sidetab", false)
         background:SetAllPoints()
