@@ -2,12 +2,14 @@
 ## Title: Tigerio's Forever Toolbox
 ## Notes: 升级日历、装备及目标提示。
 ## Author: 陌上猛虎
-## Version: 0.1.1
+## Version: 0.1.2
 ## SavedVariables: TigerioForeverToolboxDB
 ## OptionalDeps: AdventureJournal, QuestieDB, Questie, BaiYunFeiQuestieCN
 
 NativeUI.lua
 Calendar.lua
+MapTime.lua
+MapTimeUI.lua
 Telemetry.lua
 MailRecipientsData.lua
 MailRecipientsUI.lua
@@ -49,6 +51,7 @@ MapStyle.lua
 BagCooldown.lua
 TopBuffScale.lua
 ChatStyle.lua
+ChatFilter.lua
 GroupStyle.lua
 PartyFrames.lua
 ProgressStyle.lua

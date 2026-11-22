@@ -4,6 +4,7 @@ local driver = CreateFrame("Frame")
 local MEDIA = "Interface\\AddOns\\TigerioForeverToolbox\\Media\\HUD\\SlotFrame.tga"
 local SIZE, GAP, COLUMNS = 38, 4, 12
 local character, bar, handle, unlocked, elapsed = nil, nil, nil, false, 0
+local dragging = false
 local icons, shown, previous = {}, 0, {}
 local completing = {}
 local FLASH_TIME = 0.45
@@ -91,10 +92,30 @@ local function position(frame)
     frame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", width * x, -height * y)
     return true
 end
+local function savePosition(frame)
+    if not current() or inCombat() then return false end
+    local width, height = UIParent:GetWidth(), UIParent:GetHeight()
+    local left, top, uiLeft, uiTop = frame:GetLeft(), frame:GetTop(), UIParent:GetLeft(), UIParent:GetTop()
+    if not finite(width) or width <= 0 or not finite(height) or height <= 0
+        or not finite(left) or not finite(top) or not finite(uiLeft) or not finite(uiTop) then return false end
+    local x, y = (left - uiLeft) / width, (uiTop - top) / height
+    if x < 0 or x > 1 or y < 0 or y > 1 then return false end
+    return pcall(function() character.position = {x = x, y = y} end)
+end
+local function stopDirectDrag(save)
+    if not dragging or not bar then return end
+    dragging = false
+    bar:StopMovingOrSizing()
+    if save then savePosition(bar) end
+    if current() then
+        position(bar)
+        if handle then position(handle) end
+    end
+end
 local function createBar()
     if bar then return end
     bar = CreateFrame("Frame", "TigerioForeverBagCooldown", UIParent)
-    bar:SetSize(SIZE, SIZE); bar:SetClampedToScreen(true)
+    bar:SetSize(SIZE, SIZE); bar:SetMovable(true); bar:SetClampedToScreen(true)
     position(bar)
 end
 local function createIcon(index)
@@ -128,6 +149,16 @@ local function createIcon(index)
     end)
     if not ok and flash then pcall(flash.Hide, flash) end
     frame:EnableMouse(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", function(self)
+        if inCombat() or enabled() ~= true or not bar then return end
+        if GameTooltip and type(GameTooltip.IsOwned) == "function" and GameTooltip:IsOwned(self) then
+            GameTooltip:Hide()
+        end
+        local ok = pcall(bar.StartMoving, bar)
+        if ok then dragging = true end
+    end)
+    frame:SetScript("OnDragStop", function() stopDirectDrag(true) end)
     frame:SetScript("OnEnter", function(self)
         if GameTooltip and type(GameTooltip.SetBagItem) == "function" and self.bag and self.slot then
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); pcall(GameTooltip.SetBagItem, GameTooltip, self.bag, self.slot); GameTooltip:Show()
@@ -140,6 +171,7 @@ local function createIcon(index)
 end
 local function refresh()
     if not bar or enabled() ~= true then
+        stopDirectDrag(false)
         if bar then bar:Hide() end
         for _, icon in ipairs(icons) do
             if icon.flashAnimation then pcall(icon.flashAnimation.Stop, icon.flashAnimation) end
@@ -151,7 +183,7 @@ local function refresh()
     local api = C_Container
     if not api or type(api.GetContainerNumSlots) ~= "function"
         or type(api.GetContainerItemInfo) ~= "function" or type(api.GetContainerItemCooldown) ~= "function"
-        or type(GetTime) ~= "function" then bar:Hide(); shown = 0; return end
+        or type(GetTime) ~= "function" then stopDirectDrag(false); bar:Hide(); shown = 0; return end
     local now = GetTime()
     if not finite(now) then return end
     local maxBag = NUM_TOTAL_EQUIPPED_BAG_SLOTS or NUM_BAG_SLOTS or 4
@@ -227,7 +259,7 @@ local function refresh()
     if shown > 0 then
         bar:SetSize(math.min(COLUMNS, shown) * (SIZE + GAP) - GAP, math.ceil(shown / COLUMNS) * (SIZE + GAP) - GAP)
         bar:Show()
-    else bar:Hide() end
+    else stopDirectDrag(true); bar:Hide() end
 end
 local function createHandle()
     if handle then return end
@@ -241,14 +273,7 @@ local function createHandle()
     handle:SetScript("OnDragStart", function(self) if unlocked and not inCombat() then self:StartMoving() end end)
     handle:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
-        if not unlocked or inCombat() or not current() then return end
-        local width, height = UIParent:GetWidth(), UIParent:GetHeight()
-        local left, top, uiLeft, uiTop = self:GetLeft(), self:GetTop(), UIParent:GetLeft(), UIParent:GetTop()
-        if not finite(width) or width <= 0 or not finite(height) or height <= 0
-            or not finite(left) or not finite(top) or not finite(uiLeft) or not finite(uiTop) then return end
-        local x, y = (left - uiLeft) / width, (uiTop - top) / height
-        if x < 0 or x > 1 or y < 0 or y > 1 then return end
-        if pcall(function() character.position = {x = x, y = y} end) then position(bar) end
+        if unlocked and savePosition(self) then position(bar) end
     end)
     handle:Hide()
 end
@@ -275,6 +300,7 @@ end
 driver:SetScript("OnEvent", function(_, event)
     if event == "PLAYER_LOGIN" then initialize(); if current() then createBar() end; notify() end
     if not current() then return end
+    if event == "PLAYER_REGEN_DISABLED" then stopDirectDrag(false) end
     if event == "PLAYER_REGEN_DISABLED" and unlocked then
         unlocked = false
         if handle then handle:StopMovingOrSizing(); handle:Hide() end
