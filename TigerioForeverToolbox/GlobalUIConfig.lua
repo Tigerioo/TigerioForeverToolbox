@@ -248,7 +248,14 @@ local function createWindow()
         end)
         f.rowButtons[index] = button
     end
-    f.status = label(f, "GameFontHighlightSmall", 32, 450, "")
+    local chatFilter = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    chatFilter:SetSize(140, 27)
+    chatFilter:SetPoint("TOPLEFT", 420, -435)
+    chatFilter:SetText("打开聊天过滤")
+    chatFilter:SetScript("OnClick", function()
+        if type(toolbox.toggleChatFilter) == "function" then toolbox.toggleChatFilter() end
+    end)
+    f.status = label(f, "GameFontHighlightSmall", 32, 468, "")
     f.status:SetWidth(700)
     UISpecialFrames[#UISpecialFrames + 1] = "TigerioForeverToolboxGlobalUI"
     f:Hide()

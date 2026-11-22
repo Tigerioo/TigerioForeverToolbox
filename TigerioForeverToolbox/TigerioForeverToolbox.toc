@@ -51,6 +51,7 @@ MapStyle.lua
 BagCooldown.lua
 TopBuffScale.lua
 ChatStyle.lua
+ChatFilter.lua
 GroupStyle.lua
 PartyFrames.lua
 ProgressStyle.lua
